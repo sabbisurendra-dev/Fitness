@@ -223,11 +223,18 @@ function buildFallbackSmartLog(
     lower.includes("shake") ||
     lower.includes("meal") ||
     lower.includes("chicken") ||
-    lower.includes("eggs") ||
+    lower.includes("egg") ||
+    lower.includes("paneer") ||
+    lower.includes("dal") ||
+    lower.includes("roti") ||
+    lower.includes("curd") ||
+    lower.includes("idli") ||
+    lower.includes("dosa") ||
+    lower.includes("rice") ||
     lower.includes("salmon") ||
     lower.includes("oat")
   ) {
-    const protein = protMatch ? Number(protMatch[1]) : 35;
+    const protein = protMatch ? Number(protMatch[1]) : 28;
     const calories = kcalMatch ? Number(kcalMatch[1]) : protein * 8 + 140;
     mealsToAdd.push({
       time: new Date().toTimeString().slice(0, 5),

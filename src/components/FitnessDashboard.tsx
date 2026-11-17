@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Dumbbell,
   Apple,
@@ -15,6 +15,8 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Sparkles,
   Sun,
   CloudCheck,
@@ -35,6 +37,10 @@ import {
   Scale,
   Utensils,
   ShieldCheck,
+  History,
+  Pin,
+  Copy,
+  Calendar,
 } from "lucide-react";
 import {
   UserProfileStore,
@@ -45,6 +51,7 @@ import {
   CustomHealthMetric,
   AiCoachMessage,
   AiRecoveryPrescription,
+  PinnedFoodStaple,
   approximateSleepBiometricsForIndianMale70kg,
   createDefaultUserProfile,
   createDefaultDailyEntry,
@@ -56,12 +63,113 @@ import {
   searchFoodsCatalog,
   calculateFoodPortionNutrition,
 } from "@/lib/nutritionDatabase";
+import {
+  isDailyEntryLogged,
+  computePeriodSummary,
+  findPreviousWorkoutSession,
+  findPreviousExerciseSets,
+  computeUserFrequentStaples,
+  UserFrequentStaple,
+} from "@/lib/historyAndStaples";
 
 interface FitnessDashboardProps {
   initialSlug?: string;
 }
 
-type ActiveTab = "all" | "workout" | "nutrition" | "sleep" | "research";
+type ActiveTab =
+  | "all"
+  | "workout"
+  | "nutrition"
+  | "sleep"
+  | "history"
+  | "research";
+
+interface DecimalInputProps
+  extends Omit<
+    React.InputHTMLAttributes<HTMLInputElement>,
+    "value" | "onChange" | "type"
+  > {
+  value: number;
+  onValueChange: (val: number) => void;
+  min?: number;
+  max?: number;
+  allowDecimal?: boolean;
+  emptyAsZero?: boolean;
+}
+
+/**
+ * Controlled decimal/integer input that preserves raw user typing (e.g. "1.", "1.2", "0.5")
+ * while focused and normalizes/clamps only on commit or valid parse.
+ */
+function DecimalInput({
+  value,
+  onValueChange,
+  min = 0,
+  max,
+  allowDecimal = true,
+  emptyAsZero = true,
+  onFocus,
+  onBlur,
+  ...rest
+}: DecimalInputProps) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState<string>(
+    Number.isFinite(value) ? String(value) : "0"
+  );
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(Number.isFinite(value) ? String(value) : "0");
+    }
+  }, [value, focused]);
+
+  const clampVal = (num: number) => {
+    let next = Math.max(min, num);
+    if (typeof max === "number") next = Math.min(max, next);
+    return next;
+  };
+
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode={allowDecimal ? "decimal" : "numeric"}
+      value={focused ? draft : Number.isFinite(value) ? String(value) : "0"}
+      onFocus={(e) => {
+        setFocused(true);
+        setDraft(value === 0 ? "" : String(value));
+        onFocus?.(e);
+      }}
+      onChange={(e) => {
+        const raw = e.target.value;
+        const regex = allowDecimal ? /^[0-9]*\.?[0-9]*$/ : /^[0-9]*$/;
+        if (!regex.test(raw)) return;
+        setDraft(raw);
+        if (raw === "" || raw === ".") {
+          if (raw === "" && emptyAsZero) {
+            onValueChange(clampVal(0));
+          }
+          return;
+        }
+        const parsed = Number(raw);
+        if (!Number.isNaN(parsed)) {
+          onValueChange(clampVal(parsed));
+        }
+      }}
+      onBlur={(e) => {
+        setFocused(false);
+        const parsed = Number(draft);
+        const committed =
+          draft.trim() === "" || draft === "." || Number.isNaN(parsed)
+            ? clampVal(0)
+            : clampVal(parsed);
+        onValueChange(committed);
+        setDraft(String(committed));
+        onBlur?.(e);
+      }}
+    />
+  );
+}
 
 const QUICK_EXERCISE_PRESETS = [
   { name: "Barbell Squat", group: "Legs" },
@@ -123,28 +231,46 @@ export default function FitnessDashboard({
   const [foodTime, setFoodTime] = useState<string>("13:00");
   const [foodSearchLoading, setFoodSearchLoading] = useState(false);
   const [foodSearchMessage, setFoodSearchMessage] = useState("");
+  const [historyWindowDays, setHistoryWindowDays] = useState<7 | 14 | 30>(7);
+  const [stapleQuantities, setStapleQuantities] = useState<Record<string, number>>({});
+  const [lastSavedTimeLabel, setLastSavedTimeLabel] = useState<string>("");
 
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isInitialLoadRef = useRef(true);
+  const hasUserEditedRef = useRef(false);
+  const latestProfileRef = useRef<UserProfileStore>(profile);
 
-  // Sync theme override with <meta name="color-scheme"> per modern-web-guidance
   useEffect(() => {
+    latestProfileRef.current = profile;
+  }, [profile]);
+
+  // Sync theme override with <meta name="color-scheme"> and cross-tab storage events
+  useEffect(() => {
+    const applyScheme = (scheme: "dark" | "light") => {
+      setColorSchemeOverride(scheme);
+      const meta = document.querySelector('meta[name="color-scheme"]');
+      if (meta) {
+        meta.setAttribute("content", scheme);
+      }
+    };
     try {
       const stored = localStorage.getItem("color-scheme") as
         | "dark"
         | "light"
         | null;
-      const initial = stored || "dark";
-      setColorSchemeOverride(initial);
-      const meta = document.querySelector('meta[name="color-scheme"]');
-      if (meta) {
-        meta.setAttribute("content", initial);
-      }
+      applyScheme(stored === "light" ? "light" : "dark");
     } catch {
       // ignore storage restrictions
     }
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "color-scheme" && (e.newValue === "light" || e.newValue === "dark")) {
+        applyScheme(e.newValue);
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   const toggleColorScheme = () => {
@@ -161,9 +287,10 @@ export default function FitnessDashboard({
     }
   };
 
-  // Load initial profile from Cloud API + LocalStorage fallback
+  // Load initial profile from Cloud API + LocalStorage fallback without clobbering active user edits
   useEffect(() => {
     let cancelled = false;
+    hasUserEditedRef.current = false;
     async function loadProfile() {
       setSyncState("loading");
       const localKey = `pulse-loop-profile-${slug}`;
@@ -173,8 +300,9 @@ export default function FitnessDashboard({
         const rawLocal = localStorage.getItem(localKey);
         if (rawLocal) {
           localData = JSON.parse(rawLocal) as UserProfileStore;
-          if (!cancelled && localData) {
+          if (!cancelled && localData && !hasUserEditedRef.current) {
             setProfile(localData);
+            latestProfileRef.current = localData;
           }
         }
       } catch {
@@ -190,14 +318,26 @@ export default function FitnessDashboard({
           if (!cancelled && data?.profile) {
             const serverProfile = data.profile as UserProfileStore;
             setStorageSource(data.source || "cloud");
-            // Prefer whichever has a newer updatedAt if local exists and server was default
+
+            // Never clobber edits typed while fetch was in-flight
+            if (hasUserEditedRef.current) {
+              return;
+            }
+
+            const localTs = localData?.updatedAt
+              ? Date.parse(localData.updatedAt) || 0
+              : 0;
+            const serverTs = serverProfile?.updatedAt
+              ? Date.parse(serverProfile.updatedAt) || 0
+              : 0;
+
             if (
-              data.source === "default" &&
               localData &&
-              localData.updatedAt
+              localData.updatedAt &&
+              (data.source === "default" || localTs > serverTs)
             ) {
               setProfile(localData);
-              // Push existing local data to server
+              latestProfileRef.current = localData;
               await fetch("/api/state", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -205,6 +345,7 @@ export default function FitnessDashboard({
               });
             } else {
               setProfile(serverProfile);
+              latestProfileRef.current = serverProfile;
               try {
                 localStorage.setItem(localKey, JSON.stringify(serverProfile));
               } catch {
@@ -230,9 +371,63 @@ export default function FitnessDashboard({
     };
   }, [slug]);
 
+  const flushSaveNow = useCallback(
+    async (profileOverride?: UserProfileStore, keepalive = false) => {
+      const targetProfile = profileOverride || latestProfileRef.current;
+      const localKey = `pulse-loop-profile-${slug}`;
+      try {
+        localStorage.setItem(localKey, JSON.stringify(targetProfile));
+      } catch {
+        // ignore
+      }
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      setSyncState("saving");
+      try {
+        const res = await fetch("/api/state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug, profile: targetProfile }),
+          keepalive,
+        });
+        if (res.ok) {
+          const result = await res.json();
+          setStorageSource(result.source || "cloud");
+          setSyncState("saved");
+          setLastSavedTimeLabel(
+            new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          );
+        } else {
+          setSyncState("local-only");
+        }
+      } catch {
+        setSyncState("local-only");
+      }
+    },
+    [slug]
+  );
+
+  // Flush pending local edits on tab close / mobile Safari backgrounding
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (hasUserEditedRef.current || saveTimerRef.current) {
+        void flushSaveNow(latestProfileRef.current, true);
+      }
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [flushSaveNow]);
+
   // Debounced auto-save on any profile state change
   const triggerAutoSave = useCallback(
     (nextProfile: UserProfileStore) => {
+      hasUserEditedRef.current = true;
+      latestProfileRef.current = nextProfile;
       const localKey = `pulse-loop-profile-${slug}`;
       try {
         localStorage.setItem(localKey, JSON.stringify(nextProfile));
@@ -245,26 +440,11 @@ export default function FitnessDashboard({
         clearTimeout(saveTimerRef.current);
       }
 
-      saveTimerRef.current = setTimeout(async () => {
-        try {
-          const res = await fetch("/api/state", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ slug, profile: nextProfile }),
-          });
-          if (res.ok) {
-            const result = await res.json();
-            setStorageSource(result.source || "cloud");
-            setSyncState("saved");
-          } else {
-            setSyncState("local-only");
-          }
-        } catch {
-          setSyncState("local-only");
-        }
-      }, 380);
+      saveTimerRef.current = setTimeout(() => {
+        void flushSaveNow(nextProfile);
+      }, 320);
     },
-    [slug]
+    [slug, flushSaveNow]
   );
 
   const currentDay: DailyEntry =
@@ -372,20 +552,69 @@ export default function FitnessDashboard({
     }
   };
 
-  // Workout helpers
+  // Workout helpers with automatic progressive overload carryover from prior sessions
   const addExercise = (presetName = "", presetGroup = "Strength") => {
+    const prev = presetName
+      ? findPreviousExerciseSets(profile, selectedDate, presetName)
+      : null;
+    const carriedSets: ExerciseSet[] =
+      prev && prev.sets.length > 0
+        ? prev.sets.map((s, idx) => ({
+            id: `s-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
+            weight: s.weight,
+            reps: s.reps,
+            rpe: s.rpe,
+            completed: true,
+          }))
+        : [{ id: `s-${Date.now()}`, weight: 40, reps: 10, rpe: 8, completed: true }];
+
     const newEx: WorkoutExercise = {
       id: `ex-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: presetName || "New Exercise",
       muscleGroup: presetGroup,
-      note: "",
-      sets: [{ id: `s-${Date.now()}`, weight: 40, reps: 10, rpe: 8, completed: true }],
+      note: prev ? `Carried over from ${prev.sourceDate}` : "",
+      sets: carriedSets,
     };
     updateCurrentDay((d) => ({
       ...d,
       workout: {
         ...d.workout,
         exercises: [...d.workout.exercises, newEx],
+      },
+    }));
+  };
+
+  const loadPreviousWorkoutIntoToday = () => {
+    const prev = findPreviousWorkoutSession(
+      profile,
+      selectedDate,
+      currentDay.workout.sessionTitle
+    );
+    if (!prev) return;
+    const nowTs = Date.now();
+    const clonedExercises: WorkoutExercise[] = prev.exercises.map((ex, eIdx) => ({
+      id: `ex-${nowTs}-${eIdx}-${Math.random().toString(36).slice(2, 5)}`,
+      name: ex.name,
+      muscleGroup: ex.muscleGroup,
+      note: "",
+      sets: ex.sets.map((s, sIdx) => ({
+        id: `s-${nowTs}-${eIdx}-${sIdx}-${Math.random().toString(36).slice(2, 4)}`,
+        weight: s.weight,
+        reps: s.reps,
+        rpe: s.rpe,
+        completed: true,
+      })),
+    }));
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        sessionTitle: prev.sessionTitle || d.workout.sessionTitle,
+        gymDurationMinutes:
+          prev.gymDurationMinutes || d.workout.gymDurationMinutes,
+        cardioMinutes: prev.cardioMinutes || d.workout.cardioMinutes,
+        cardioType: prev.cardioType || d.workout.cardioType,
+        exercises: [...d.workout.exercises, ...clonedExercises],
       },
     }));
   };
@@ -588,12 +817,12 @@ export default function FitnessDashboard({
     }
   };
 
-  // Sleep 70 kg Indian male auto-approximation helper
+  // Sleep 70 kg Indian male auto-approximation helper (supports 0-23h decimals)
   const updateSleepWith70kgIndianBaseline = (
     nextHours: number,
     nextQuality: number
   ) => {
-    const safeHours = Math.max(0, Math.min(16, Number(nextHours) || 0));
+    const safeHours = Math.max(0, Math.min(23, Number(nextHours) || 0));
     const safeQuality = Math.max(1, Math.min(10, Number(nextQuality) || 1));
     const approx = approximateSleepBiometricsForIndianMale70kg(
       safeHours,
@@ -611,6 +840,75 @@ export default function FitnessDashboard({
         awakeMinutes: approx.awakeMinutes,
         restingHeartRate: approx.restingHeartRate,
         hrvMs: approx.hrvMs,
+      },
+    }));
+  };
+
+  const togglePinFoodItem = (item: FoodDatabaseItem) => {
+    const defaultPortion = item.portions[0] || {
+      label: "100g serving",
+      grams: 100,
+    };
+    updateProfileMeta((prev) => {
+      const existing = prev.pinnedStaples || [];
+      const alreadyPinned = existing.some(
+        (p) => p.name.trim().toLowerCase() === item.name.trim().toLowerCase()
+      );
+      if (alreadyPinned) {
+        return {
+          ...prev,
+          pinnedStaples: existing.filter(
+            (p) => p.name.trim().toLowerCase() !== item.name.trim().toLowerCase()
+          ),
+        };
+      }
+      const nextPin: PinnedFoodStaple = {
+        id: `pin-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        name: item.name,
+        caloriesPer100g: item.caloriesPer100g,
+        proteinPer100g: item.proteinPer100g,
+        carbsPer100g: item.carbsPer100g,
+        fatsPer100g: item.fatsPer100g,
+        fiberPer100g: item.fiberPer100g,
+        waterLitersPer100g: item.waterLitersPer100g,
+        defaultPortionLabel: defaultPortion.label,
+        defaultGrams: defaultPortion.grams,
+        source: item.source || "Custom",
+      };
+      return {
+        ...prev,
+        pinnedStaples: [nextPin, ...existing].slice(0, 12),
+      };
+    });
+  };
+
+  const addUserFrequentStapleMeal = (
+    staple: UserFrequentStaple,
+    quantity = 1
+  ) => {
+    const safeQty = Math.max(0.25, Math.min(20, Number(quantity) || 1));
+    const meal: MealEntry = {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: foodTime || new Date().toTimeString().slice(0, 5),
+      name:
+        safeQty !== 1
+          ? `${staple.name} (×${Number(safeQty.toFixed(2))})`
+          : staple.name,
+      calories: Math.round(staple.calories * safeQty),
+      protein: Math.round(staple.protein * safeQty),
+      carbs: Math.round(staple.carbs * safeQty),
+      fats: Math.round(staple.fats * safeQty),
+      fiberGrams: Number((staple.fiberGrams * safeQty).toFixed(1)),
+      waterLiters: Number((staple.waterLiters * safeQty).toFixed(2)),
+      portionLabel: staple.portionLabel,
+      weightGrams: Math.round((staple.weightGrams || 100) * safeQty),
+      note: "",
+    };
+    updateCurrentDay((d) => ({
+      ...d,
+      nutrition: {
+        ...d.nutrition,
+        meals: [...d.nutrition.meals, meal],
       },
     }));
   };
@@ -640,9 +938,9 @@ export default function FitnessDashboard({
   const addCustomMetric = () => {
     const newMetric: CustomHealthMetric = {
       id: `cm-${Date.now()}`,
-      label: "Custom Metric",
-      value: "100",
-      unit: "mg",
+      label: "Custom Supplement / Metric",
+      value: "",
+      unit: "",
       note: "",
     };
     updateCurrentDay((d) => ({
@@ -1042,6 +1340,28 @@ export default function FitnessDashboard({
 
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
 
+  const frequentStaples = useMemo(
+    () => computeUserFrequentStaples(profile, 10),
+    [profile]
+  );
+
+  const periodSummary = useMemo(
+    () => computePeriodSummary(profile, selectedDate, historyWindowDays),
+    [profile, selectedDate, historyWindowDays]
+  );
+
+  const previousWorkoutSession = useMemo(
+    () =>
+      findPreviousWorkoutSession(
+        profile,
+        selectedDate,
+        currentDay.workout.sessionTitle
+      ),
+    [profile, selectedDate, currentDay.workout.sessionTitle]
+  );
+
+  const isTodayBlank = !isDailyEntryLogged(currentDay);
+
   const combinedCatalogMatches = (() => {
     const baseMatches = searchFoodsCatalog(foodSearchQuery);
     const merged = [...aiFoodResults, ...baseMatches];
@@ -1174,15 +1494,21 @@ export default function FitnessDashboard({
                 onClick={toggleColorScheme}
                 aria-label={
                   colorSchemeOverride === "dark"
-                    ? "Switch to light theme"
-                    : "Switch to dark theme"
+                    ? "Switch to light mode"
+                    : "Switch to dark mode"
                 }
-                className="inline-flex items-center justify-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-xs hover:border-emerald-500/40 transition"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium hover:border-emerald-500/40 transition"
               >
                 {colorSchemeOverride === "dark" ? (
-                  <Sun className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                  <>
+                    <Sun className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+                    <span>Light Mode</span>
+                  </>
                 ) : (
-                  <Moon className="h-4 w-4 text-indigo-500" aria-hidden="true" />
+                  <>
+                    <Moon className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
+                    <span>Dark Mode</span>
+                  </>
                 )}
               </button>
             </div>
@@ -1193,8 +1519,8 @@ export default function FitnessDashboard({
             <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/30 bg-[var(--bg-elevated)] p-2.5 text-xs">
               <div className="text-[var(--text-muted)]">
                 Every custom URL gets its own isolated auto-saved profile (e.g.{" "}
-                <code className="text-emerald-400">/u/alex</code>,{" "}
-                <code className="text-emerald-400">/u/client1</code>):
+                <code className="text-emerald-400">/u/rahul</code>,{" "}
+                <code className="text-emerald-400">/u/client-ananya</code>):
               </div>
               <form
                 onSubmit={(e) => {
@@ -1231,9 +1557,9 @@ export default function FitnessDashboard({
           )}
 
           {/* Date Bar + Module Filter Pills */}
-          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 pt-1">
+          <div className="mt-2.5 flex flex-col gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between">
             {/* Date Picker */}
-            <div className="flex items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1">
+            <div className="flex items-center justify-between sm:justify-start gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1">
               <button
                 type="button"
                 onClick={() => shiftDate(-1)}
@@ -1273,7 +1599,7 @@ export default function FitnessDashboard({
             {/* Module Filter Pills */}
             <nav
               aria-label="Dashboard Modules"
-              className="flex flex-wrap items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1"
+              className="flex items-center gap-1 overflow-x-auto no-scrollbar rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1"
             >
               {(
                 [
@@ -1281,6 +1607,7 @@ export default function FitnessDashboard({
                   { id: "workout", label: "1. Workouts" },
                   { id: "nutrition", label: "2. Nutrition" },
                   { id: "sleep", label: "3. Sleep & Recovery" },
+                  { id: "history", label: "History & Trends" },
                   { id: "research", label: "About Us" },
                 ] as { id: ActiveTab; label: string }[]
               ).map((tab) => (
@@ -1288,7 +1615,7 @@ export default function FitnessDashboard({
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveTab(tab.id)}
-                  className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                  className={`whitespace-nowrap shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
                     activeTab === tab.id
                       ? "bg-emerald-500 text-slate-950 font-semibold shadow-xs"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
@@ -1302,191 +1629,211 @@ export default function FitnessDashboard({
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-5 px-3.5 pt-5 sm:px-6">
-        {/* TOP CLOSED-LOOP SUFFICIENCY & READINESS BANNER */}
-        <section
-          aria-label="Daily Sufficiency and Readiness Summary"
-          className={`rounded-2xl border p-4 sm:p-5 transition ${
-            analysis.verdictLevel === "optimal"
-              ? "border-emerald-500/40 bg-emerald-500/5"
-              : analysis.verdictLevel === "moderate"
-              ? "border-amber-500/40 bg-amber-500/5"
-              : "border-rose-500/40 bg-rose-500/5"
-          }`}
-        >
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider ${
-                    analysis.verdictLevel === "optimal"
-                      ? "bg-emerald-500/20 text-emerald-400"
-                      : analysis.verdictLevel === "moderate"
-                      ? "bg-amber-500/20 text-amber-400"
-                      : "bg-rose-500/20 text-rose-400"
-                  }`}
-                >
-                  {analysis.verdictLevel === "optimal" ? (
-                    <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                  ) : analysis.verdictLevel === "moderate" ? (
-                    <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                  ) : (
-                    <AlertOctagon className="h-3.5 w-3.5" aria-hidden="true" />
-                  )}
-                  {analysis.verdictLevel === "optimal"
-                    ? "Optimal Recovery Loop"
-                    : analysis.verdictLevel === "moderate"
-                    ? "Borderline Sufficiency"
-                    : "Recovery / Fueling Deficit"}
-                </span>
-
-                <span className="text-xs text-[var(--text-muted)]">
-                  WHOOP / Oura / Clinical Sufficiency Engine
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (activeTab !== "all") {
-                      setActiveTab("all");
-                      setShowAiHub(true);
-                    } else {
-                      setShowAiHub((v) => !v);
-                    }
-                  }}
-                  aria-expanded={activeTab === "all" && showAiHub}
-                  aria-controls="gemini-ai-hub"
-                  className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
-                >
-                  <Sparkles className="h-3 w-3" aria-hidden="true" />
-                  <span>
-                    {activeTab === "all" && showAiHub
-                      ? "Hide Gemini AI Hub"
-                      : "Open Gemini AI Hub"}
-                  </span>
-                </button>
-              </div>
-
-              <h1 className="text-lg font-bold tracking-tight sm:text-xl">
-                {analysis.verdictHeadline}
-              </h1>
-              <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
-                {analysis.verdictExplanation}
-              </p>
-            </div>
-
-            {/* 4 Key Ring Gauges */}
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 shrink-0">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                  Readiness
-                </div>
-                <div className="mt-0.5 text-xl font-extrabold text-emerald-400">
-                  {analysis.readinessScore}%
-                </div>
-                <div className="text-[10px] text-[var(--text-muted)]">
-                  Holistic Score
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                  Gym Strain
-                </div>
-                <div className="mt-0.5 text-xl font-extrabold text-sky-400">
-                  {analysis.strainScore}
-                  <span className="text-xs font-normal text-[var(--text-muted)]">
-                    /21
-                  </span>
-                </div>
-                <div className="text-[10px] text-[var(--text-muted)]">
-                  {currentDay.workout.gymDurationMinutes}m · {analysis.totalSets} sets
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                  Sleep vs Need
-                </div>
-                <div className="mt-0.5 text-xl font-extrabold text-indigo-400">
-                  {currentDay.sleep.totalHours}h
-                  <span className="text-xs font-normal text-[var(--text-muted)]">
-                    /{analysis.requiredSleepHours}h
-                  </span>
-                </div>
-                <div className="text-[10px] text-[var(--text-muted)]">
-                  Deep: {currentDay.sleep.deepSleepHours}h ({analysis.deepSleepPercentage}%)
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                  Fuel & Protein
-                </div>
-                <div className="mt-0.5 text-xl font-extrabold text-amber-400">
-                  {currentDay.nutrition.protein}g
-                  <span className="text-xs font-normal text-[var(--text-muted)]">
-                    /{currentDay.nutrition.proteinTarget}g
-                  </span>
-                </div>
-                <div className="text-[10px] text-[var(--text-muted)]">
-                  {currentDay.nutrition.calories} / {currentDay.nutrition.calorieTarget} kcal
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* 3 Clinical Sufficiency Checks */}
-          <div className="mt-3.5 grid gap-2 sm:grid-cols-3">
-            {Object.entries(analysis.clinicalPillarChecks).map(
-              ([key, check]) => (
-                <div
-                  key={key}
-                  className="flex items-start gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]/90 p-2.5 text-xs"
-                >
+      <main className="mx-auto max-w-5xl space-y-5 px-3.5 pt-4 sm:px-6 sm:pt-5">
+        {/* TOP DAILY RECOVERY & SUFFICIENCY SUMMARY (Hidden on About Us & History tabs) */}
+        {(activeTab === "all" ||
+          activeTab === "workout" ||
+          activeTab === "nutrition" ||
+          activeTab === "sleep") && (
+          <section
+            aria-label="Daily Sufficiency and Readiness Summary"
+            className={`rounded-2xl border p-4 sm:p-5 transition ${
+              isTodayBlank
+                ? "border-[var(--border-subtle)] bg-[var(--bg-surface)]"
+                : analysis.verdictLevel === "optimal"
+                ? "border-emerald-500/40 bg-emerald-500/5"
+                : analysis.verdictLevel === "moderate"
+                ? "border-amber-500/40 bg-amber-500/5"
+                : "border-rose-500/40 bg-rose-500/5"
+            }`}
+          >
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
                   <span
-                    className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${
-                      check.status === "optimal"
-                        ? "bg-emerald-400"
-                        : check.status === "warning"
-                        ? "bg-amber-400"
-                        : "bg-rose-400"
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider ${
+                      isTodayBlank
+                        ? "bg-sky-500/15 text-sky-400"
+                        : analysis.verdictLevel === "optimal"
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : analysis.verdictLevel === "moderate"
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "bg-rose-500/20 text-rose-400"
                     }`}
-                  />
-                  <div>
-                    <div className="font-semibold">{check.label}</div>
-                    <div className="text-[11px] text-[var(--text-muted)]">
-                      {check.detail}
-                    </div>
+                  >
+                    {isTodayBlank ? (
+                      <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
+                    ) : analysis.verdictLevel === "optimal" ? (
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    ) : analysis.verdictLevel === "moderate" ? (
+                      <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                    ) : (
+                      <AlertOctagon className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                    {isTodayBlank
+                      ? "Ready to Log Today"
+                      : analysis.verdictLevel === "optimal"
+                      ? "Optimal Recovery Loop"
+                      : analysis.verdictLevel === "moderate"
+                      ? "Borderline Sufficiency"
+                      : "Recovery / Fueling Deficit"}
+                  </span>
+
+                  <span className="text-xs text-[var(--text-muted)]">
+                    Daily Check-In · {selectedDate}
+                  </span>
+                </div>
+
+                <h1 className="text-lg font-bold tracking-tight sm:text-xl">
+                  {isTodayBlank
+                    ? "Start logging today's workouts, meals, or sleep"
+                    : analysis.verdictHeadline}
+                </h1>
+                <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
+                  {isTodayBlank
+                    ? "Nothing is pre-filled. Add your lifts, search your food or tap one of your frequent staples, and enter last night's sleep hours to compute Readiness & Recovery."
+                    : analysis.verdictExplanation}
+                </p>
+              </div>
+
+              {/* 4 Key Summary Gauges */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 shrink-0">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
+                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
+                    Readiness
+                  </div>
+                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-emerald-400">
+                    {analysis.readinessScore}%
+                  </div>
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    Sleep + Strain + Fuel
                   </div>
                 </div>
-              )
-            )}
-          </div>
 
-          {/* General Daily Context Note (Inline Auto-Save) */}
-          <div className="mt-3 flex items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2">
-            <FileText
-              className="h-4 w-4 shrink-0 text-[var(--text-muted)]"
-              aria-hidden="true"
-            />
-            <input
-              type="text"
-              aria-label="Daily Master Note"
-              placeholder="Type a general daily note, morning mindset, injury tweak, or coach check-in..."
-              value={currentDay.dailyNote}
-              onChange={(e) =>
-                updateCurrentDay((d) => ({ ...d, dailyNote: e.target.value }))
-              }
-              className="w-full bg-transparent text-xs sm:text-sm focus:outline-none"
-            />
-          </div>
-        </section>
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
+                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
+                    Gym Strain
+                  </div>
+                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-sky-400">
+                    {analysis.strainScore}
+                    <span className="text-xs font-normal text-[var(--text-muted)]">
+                      /21
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    {currentDay.workout.gymDurationMinutes}m · {analysis.totalSets} sets
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
+                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
+                    Sleep vs Need
+                  </div>
+                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-indigo-400">
+                    {currentDay.sleep.totalHours}h
+                    <span className="text-xs font-normal text-[var(--text-muted)]">
+                      /{analysis.requiredSleepHours}h
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    Deep: {currentDay.sleep.deepSleepHours}h ({analysis.deepSleepPercentage}%)
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
+                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
+                    Fuel &amp; Protein
+                  </div>
+                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-amber-400">
+                    {currentDay.nutrition.calories}
+                    <span className="text-xs font-normal text-[var(--text-muted)]">
+                      {" "}kcal
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    Protein: <strong className="text-[var(--text-primary)]">{currentDay.nutrition.protein}g</strong> / {currentDay.nutrition.proteinTarget}g
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 3 Pillar Checks: Sleep vs Training Load, Deep Sleep Repair, Fuel & Protein */}
+            <div className="mt-3.5 grid gap-2 sm:grid-cols-3">
+              {Object.entries(analysis.clinicalPillarChecks).map(
+                ([key, check]) => (
+                  <div
+                    key={key}
+                    className="flex items-start gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]/90 p-2.5 text-xs"
+                  >
+                    <span
+                      className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                        check.status === "optimal"
+                          ? "bg-emerald-400"
+                          : check.status === "warning"
+                          ? "bg-amber-400"
+                          : "bg-rose-400"
+                      }`}
+                    />
+                    <div>
+                      <div className="font-semibold">{check.label}</div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {check.detail}
+                      </div>
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
+
+            {/* Daily Master Note (Auto-Saved + Explicit Cloud Flush on Blur) */}
+            <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="daily-master-note"
+                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-muted)]"
+                >
+                  <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Daily Summary Comment / Check-In</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-[var(--text-muted)]">
+                    {syncState === "saving"
+                      ? "Saving..."
+                      : syncState === "local-only"
+                      ? "Saved on device"
+                      : lastSavedTimeLabel
+                      ? `Saved ${lastSavedTimeLabel}`
+                      : "Auto-saved"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void flushSaveNow()}
+                    className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:border-emerald-500/40 transition"
+                  >
+                    Save Note
+                  </button>
+                </div>
+              </div>
+              <textarea
+                id="daily-master-note"
+                rows={1}
+                aria-label="Daily Master Note"
+                placeholder="Type a general daily comment, energy check-in, soreness, or coaching reminder..."
+                value={currentDay.dailyNote}
+                onChange={(e) =>
+                  updateCurrentDay((d) => ({ ...d, dailyNote: e.target.value }))
+                }
+                onBlur={() => void flushSaveNow()}
+                className="auto-grow-textarea w-full bg-transparent text-xs sm:text-sm focus:outline-none"
+              />
+            </div>
+          </section>
+        )}
 
         {/* =========================================================
             GEMINI INTERACTIONS API AI HUB (Per-URL & Per-Date Stateful Coach)
            ========================================================= */}
-        {activeTab === "all" && showAiHub && (
+        {activeTab === "all" && (
           <section
             id="gemini-ai-hub"
             aria-labelledby="heading-gemini-hub"
@@ -1511,10 +1858,30 @@ export default function FitnessDashboard({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
-                <fieldset className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAiHub((v) => !v)}
+                  aria-expanded={showAiHub}
+                  aria-controls="gemini-ai-hub-body"
+                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+                >
+                  {showAiHub ? (
+                    <>
+                      <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Collapse</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Expand AI Hub</span>
+                    </>
+                  )}
+                </button>
+
+                <fieldset className="flex flex-wrap items-center gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1.5">
                   <legend className="px-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                    Gemini Model
+                    Model
                   </legend>
                   <div className="inline-flex items-center gap-1.5">
                     <input
@@ -1576,7 +1943,33 @@ export default function FitnessDashboard({
               </div>
             </div>
 
-            {geminiStatusMessage && (
+            {showAiHub && (
+              <div id="gemini-ai-hub-body" className="space-y-4">
+                {/* Crystal-Clear Background Workflow Explainer */}
+                <div className="grid gap-2 sm:grid-cols-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 text-[11px] leading-relaxed">
+                  <div>
+                    <span className="font-bold text-emerald-400">
+                      1. Optimize Day with Gemini:
+                    </span>{" "}
+                    Reads today&apos;s workouts, protein/calories &amp; sleep debt on{" "}
+                    <code className="text-[var(--text-primary)]">/api/gemini</code> and generates 3 actionable priorities plus 1-click meal &amp; recovery finishers.
+                  </div>
+                  <div>
+                    <span className="font-bold text-sky-400">
+                      2. Natural-Language Smart Logger:
+                    </span>{" "}
+                    Type plain text like &ldquo;4x8 Squats 90kg + paneer bowl 520 kcal&rdquo;; parses sets, macros, cardio &amp; sleep directly into today&apos;s logs.
+                  </div>
+                  <div>
+                    <span className="font-bold text-indigo-400">
+                      3. Stateful Gemini Coach:
+                    </span>{" "}
+                    Multi-turn recovery chat chained via{" "}
+                    <code>previous_interaction_id</code>. Runs Gemini 4 live when API key is set, or automatic local calculation fallback offline.
+                  </div>
+                </div>
+
+                {geminiStatusMessage && (
               <div
                 role="status"
                 aria-live="polite"
@@ -1943,6 +2336,266 @@ export default function FitnessDashboard({
                 </form>
               </div>
             </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* =========================================================
+            HISTORY & MULTI-DAY PERFORMANCE TRENDS (7d / 14d / 30d)
+           ========================================================= */}
+        {activeTab === "history" && (
+          <section
+            aria-labelledby="heading-history"
+            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
+                  <History className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2
+                    id="heading-history"
+                    className="text-base font-bold sm:text-lg"
+                  >
+                    History &amp; Multi-Day Trends
+                  </h2>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Consolidated performance across Workouts, Nutrition &amp; Sleep ending{" "}
+                    <strong className="text-[var(--text-primary)]">{selectedDate}</strong>
+                  </p>
+                </div>
+              </div>
+
+              {/* Timeframe Switcher: Week / 2 Weeks / Month */}
+              <div
+                role="group"
+                aria-label="History Timeframe"
+                className="inline-flex items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1"
+              >
+                {(
+                  [
+                    { days: 7, label: "7 Days (Week)" },
+                    { days: 14, label: "14 Days (2 Weeks)" },
+                    { days: 30, label: "30 Days (Month)" },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.days}
+                    type="button"
+                    onClick={() => setHistoryWindowDays(opt.days)}
+                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                      historyWindowDays === opt.days
+                        ? "bg-emerald-500 text-slate-950"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {periodSummary.loggedDaysCount === 0 ? (
+              <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-6 text-center space-y-2">
+                <div className="text-sm font-semibold">
+                  No logged days found between {periodSummary.startDate} and {periodSummary.endDate}
+                </div>
+                <p className="text-xs text-[var(--text-muted)] max-w-md mx-auto">
+                  Log workouts, meals, or sleep on any day and switch back here to inspect weekly, 2-week, and monthly averages, lift weight progression, and saved notes.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("all")}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                >
+                  Log Today&apos;s Data
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Consolidated KPI Grid */}
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400">
+                      Workouts ({historyWindowDays}d)
+                    </div>
+                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
+                      {periodSummary.workoutDaysCount} sessions
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      {periodSummary.totalSets} sets · {periodSummary.totalReps} reps · {periodSummary.totalGymMinutes}m gym + {periodSummary.totalCardioMinutes}m cardio
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">
+                      Nutrition Avg / Day
+                    </div>
+                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
+                      {periodSummary.avgCalories} kcal
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      Avg Protein: <strong className="text-[var(--text-primary)]">{periodSummary.avgProtein}g</strong> · Carbs {periodSummary.avgCarbs}g · Fats {periodSummary.avgFats}g ({periodSummary.proteinTargetHitDays}/{periodSummary.nutritionDaysCount} days &ge;90% goal)
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
+                      Sleep Avg / Night
+                    </div>
+                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
+                      {periodSummary.avgSleepHours}h · {periodSummary.avgSleepQuality}/10
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      Avg RHR: {periodSummary.avgRestingHr || "--"} bpm · Avg HRV: {periodSummary.avgHrvMs || "--"} ms
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
+                      Recovery Consistency
+                    </div>
+                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
+                      {periodSummary.avgReadinessScore}% avg
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      {periodSummary.optimalDays} Optimal · {periodSummary.moderateDays} Moderate · {periodSummary.deficitDays} Deficit days
+                    </div>
+                  </div>
+                </div>
+
+                {/* Lift Progression Tracker */}
+                {periodSummary.exerciseProgression.length > 0 && (
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400">
+                        Top Exercise Progression ({periodSummary.startDate} to {periodSummary.endDate})
+                      </h3>
+                      <span className="text-[11px] text-[var(--text-muted)]">
+                        Comparing first vs. latest top set
+                      </span>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {periodSummary.exerciseProgression.slice(0, 9).map((ex) => (
+                        <div
+                          key={ex.name}
+                          className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold truncate">{ex.name}</div>
+                            <div className="text-[10px] text-[var(--text-muted)]">
+                              {ex.sessionsCount} sessions · Latest {ex.latestDate}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-bold tabular-nums">
+                              {ex.latestWeight} {profile.weightUnit} × {ex.latestReps}
+                            </div>
+                            <div
+                              className={`text-[10px] font-semibold ${
+                                ex.weightDelta > 0
+                                  ? "text-emerald-400"
+                                  : ex.weightDelta < 0
+                                  ? "text-amber-400"
+                                  : "text-[var(--text-muted)]"
+                              }`}
+                            >
+                              {ex.weightDelta > 0
+                                ? `+${ex.weightDelta} ${profile.weightUnit}`
+                                : ex.weightDelta < 0
+                                ? `${ex.weightDelta} ${profile.weightUnit}`
+                                : `Matched ${ex.earliestWeight} ${profile.weightUnit}`}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Day-by-Day In-Depth Overview */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                      Day-by-Day Breakdown &amp; Saved Notes ({periodSummary.dailyRows.length} logged days)
+                    </h3>
+                  </div>
+                  <div className="space-y-2">
+                    {periodSummary.dailyRows.map((row) => (
+                      <div
+                        key={row.date}
+                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-2"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs font-bold text-emerald-400">
+                              {row.date}
+                            </span>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+                                row.verdictLevel === "optimal"
+                                  ? "bg-emerald-500/20 text-emerald-400"
+                                  : row.verdictLevel === "moderate"
+                                  ? "bg-amber-500/20 text-amber-400"
+                                  : "bg-rose-500/20 text-rose-400"
+                              }`}
+                            >
+                              Readiness {row.readinessScore}% · Strain {row.strainScore}/21
+                            </span>
+                            <span className="text-xs font-medium truncate max-w-[240px]">
+                              {row.workoutTitle}
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDate(row.date);
+                              setActiveTab("all");
+                            }}
+                            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
+                          >
+                            Open Day
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
+                            <span className="text-[var(--text-muted)]">Workouts: </span>
+                            <strong>{row.totalSets} sets</strong> · {row.totalReps} reps · {row.gymMinutes + row.cardioMinutes}m
+                          </div>
+                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
+                            <span className="text-[var(--text-muted)]">Fuel: </span>
+                            <strong>{row.calories} kcal</strong> · {row.protein}g P ({row.mealsCount} meals)
+                          </div>
+                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
+                            <span className="text-[var(--text-muted)]">Sleep: </span>
+                            <strong>{row.sleepHours}h</strong> ({row.sleepQuality}/10) · HRV {row.hrvMs}ms
+                          </div>
+                        </div>
+
+                        {row.allNotesSummary.length > 0 && (
+                          <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 space-y-1 text-[11px]">
+                            {row.allNotesSummary.map((n, nIdx) => (
+                              <div key={nIdx}>
+                                <span className="font-semibold text-emerald-400">
+                                  {n.area}:{" "}
+                                </span>
+                                <span className="text-[var(--text-muted)]">
+                                  {n.text}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
           </section>
         )}
 
@@ -1976,8 +2629,8 @@ export default function FitnessDashboard({
                 </div>
               </div>
 
-              {/* Weight Unit Toggle (kg / lbs) */}
-              <div className="flex items-center gap-2">
+              {/* Weight Unit Toggle + Previous Session Carryover + Add Exercise */}
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() =>
@@ -1986,10 +2639,23 @@ export default function FitnessDashboard({
                       weightUnit: p.weightUnit === "kg" ? "lbs" : "kg",
                     }))
                   }
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-xs font-semibold hover:border-sky-500/40"
+                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-semibold hover:border-sky-500/40"
                 >
                   Unit: {profile.weightUnit.toUpperCase()}
                 </button>
+                {previousWorkoutSession && (
+                  <button
+                    type="button"
+                    onClick={loadPreviousWorkoutIntoToday}
+                    title={`Load ${previousWorkoutSession.sessionTitle} from ${previousWorkoutSession.sourceDate} with previous weights & reps`}
+                    className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-1.5 text-xs font-semibold text-sky-400 hover:bg-sky-500/20 transition"
+                  >
+                    <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      Load Prev ({previousWorkoutSession.sourceDate.slice(5)})
+                    </span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => addExercise()}
@@ -2113,7 +2779,39 @@ export default function FitnessDashboard({
 
             {/* Exercise Cards List */}
             <div className="space-y-3">
-              {currentDay.workout.exercises.map((exercise, exIdx) => (
+              {currentDay.workout.exercises.length === 0 && (
+                <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-center space-y-2">
+                  <div className="text-xs sm:text-sm font-semibold">
+                    No exercises logged yet for {selectedDate}
+                  </div>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    Tap a Quick Add movement above, add a custom exercise, or{" "}
+                    {previousWorkoutSession
+                      ? `load your previous session (${previousWorkoutSession.sessionTitle} from ${previousWorkoutSession.sourceDate}) to beat your previous weights and reps.`
+                      : "enter your sets, weights, and reps to start progressive overload tracking."}
+                  </p>
+                  {previousWorkoutSession && (
+                    <button
+                      type="button"
+                      onClick={loadPreviousWorkoutIntoToday}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400 transition"
+                    >
+                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        Carry Over {previousWorkoutSession.sessionTitle} (
+                        {previousWorkoutSession.exercises.length} exercises)
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
+              {currentDay.workout.exercises.map((exercise, exIdx) => {
+                const prevSetsForEx = findPreviousExerciseSets(
+                  profile,
+                  selectedDate,
+                  exercise.name
+                );
+                return (
                 <div
                   key={exercise.id}
                   className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 sm:p-4 space-y-2.5"
@@ -2143,7 +2841,7 @@ export default function FitnessDashboard({
                           })
                         }
                         placeholder="Muscle"
-                        className="w-28 shrink-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-center text-[11px] text-[var(--text-muted)]"
+                        className="hidden sm:block w-24 shrink-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-center text-[11px] text-[var(--text-muted)]"
                       />
                     </div>
 
@@ -2167,100 +2865,92 @@ export default function FitnessDashboard({
                     </div>
                   </div>
 
-                  {/* Sets Inline Table (Clean Exercise, Weight, Reps, Done) */}
+                  {prevSetsForEx && (
+                    <div className="text-[11px] text-sky-400/90">
+                      Previous ({prevSetsForEx.sourceDate}):{" "}
+                      {prevSetsForEx.sets
+                        .map((ps) => `${ps.weight}${profile.weightUnit}×${ps.reps}`)
+                        .join(" · ")}
+                    </div>
+                  )}
+
+                  {/* Crisp Mobile-First Set Grid (Set | Weight | Reps | Done) with zero wasted horizontal gaps */}
                   <div
-                    tabIndex={0}
                     role="region"
                     aria-label={`${exercise.name || `Exercise ${exIdx + 1}`} sets`}
-                    className="overflow-x-auto"
+                    className="max-w-md space-y-1.5"
                   >
-                    <table className="w-full text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)]">
-                          <th scope="col" className="py-1.5 pr-2 w-12">Set</th>
-                          <th scope="col" className="py-1.5 px-2">
-                            Weight ({profile.weightUnit})
-                          </th>
-                          <th scope="col" className="py-1.5 px-2">Reps</th>
-                          <th scope="col" className="py-1.5 pl-2 text-right">Done</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[var(--border-subtle)]/50">
-                        {exercise.sets.map((s, sIdx) => (
-                          <tr
-                            key={s.id}
-                            className={
-                              s.completed ? "" : "opacity-50"
+                    <div className="grid grid-cols-[2.25rem_5.5rem_4.5rem_1fr] items-center gap-2 border-b border-[var(--border-subtle)] pb-1 text-[11px] font-medium text-[var(--text-muted)]">
+                      <span>Set</span>
+                      <span>Weight ({profile.weightUnit})</span>
+                      <span>Reps</span>
+                      <span className="text-left">Done</span>
+                    </div>
+                    <div className="divide-y divide-[var(--border-subtle)]/50">
+                      {exercise.sets.map((s, sIdx) => (
+                        <div
+                          key={s.id}
+                          className={`grid grid-cols-[2.25rem_5.5rem_4.5rem_1fr] items-center gap-2 py-1.5 text-xs ${
+                            s.completed ? "" : "opacity-55"
+                          }`}
+                        >
+                          <span className="font-semibold text-[var(--text-muted)] tabular-nums">
+                            #{sIdx + 1}
+                          </span>
+                          <DecimalInput
+                            allowDecimal
+                            min={0}
+                            aria-label={`Set ${sIdx + 1} Weight`}
+                            value={s.weight}
+                            onValueChange={(val) =>
+                              updateExerciseSet(exercise.id, s.id, {
+                                weight: val,
+                              })
                             }
-                          >
-                            <td className="py-1.5 pr-2 font-semibold text-[var(--text-muted)]">
-                              #{sIdx + 1}
-                            </td>
-                            <td className="py-1.5 px-2">
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                aria-label={`Set ${sIdx + 1} Weight`}
-                                value={s.weight}
-                                onChange={(e) =>
-                                  updateExerciseSet(exercise.id, s.id, {
-                                    weight:
-                                      Number(
-                                        e.target.value.replace(/[^0-9.]/g, "")
-                                      ) || 0,
-                                  })
+                            onBlur={() => void flushSaveNow()}
+                            className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
+                          />
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
+                            aria-label={`Set ${sIdx + 1} Reps`}
+                            value={s.reps}
+                            onValueChange={(val) =>
+                              updateExerciseSet(exercise.id, s.id, {
+                                reps: Math.round(val),
+                              })
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
+                          />
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              aria-label={`Mark set ${sIdx + 1} completed`}
+                              checked={s.completed}
+                              onChange={(e) =>
+                                updateExerciseSet(exercise.id, s.id, {
+                                  completed: e.target.checked,
+                                })
+                              }
+                              className="h-5 w-5 rounded accent-emerald-500 cursor-pointer"
+                            />
+                            {exercise.sets.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  removeExerciseSet(exercise.id, s.id)
                                 }
-                                className="w-24 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 font-semibold focus:border-sky-400 focus:outline-none"
-                              />
-                            </td>
-                            <td className="py-1.5 px-2">
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                aria-label={`Set ${sIdx + 1} Reps`}
-                                value={s.reps}
-                                onChange={(e) =>
-                                  updateExerciseSet(exercise.id, s.id, {
-                                    reps:
-                                      Number(
-                                        e.target.value.replace(/[^0-9]/g, "")
-                                      ) || 0,
-                                  })
-                                }
-                                className="w-20 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 font-semibold focus:border-sky-400 focus:outline-none"
-                              />
-                            </td>
-                            <td className="py-1.5 pl-2 text-right">
-                              <div className="inline-flex items-center gap-1.5">
-                                <input
-                                  type="checkbox"
-                                  aria-label={`Mark set ${sIdx + 1} completed`}
-                                  checked={s.completed}
-                                  onChange={(e) =>
-                                    updateExerciseSet(exercise.id, s.id, {
-                                      completed: e.target.checked,
-                                    })
-                                  }
-                                  className="h-4 w-4 rounded accent-emerald-500"
-                                />
-                                {exercise.sets.length > 1 && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      removeExerciseSet(exercise.id, s.id)
-                                    }
-                                    aria-label={`Remove set ${sIdx + 1}`}
-                                    className="text-[var(--text-muted)] hover:text-rose-400 p-1"
-                                  >
-                                    ×
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                                aria-label={`Remove set ${sIdx + 1}`}
+                                className="rounded p-1 text-sm text-[var(--text-muted)] hover:bg-rose-500/15 hover:text-rose-400"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   {/* Per-Exercise Inline Note */}
@@ -2273,21 +2963,28 @@ export default function FitnessDashboard({
                       onChange={(e) =>
                         updateExercise(exercise.id, { note: e.target.value })
                       }
+                      onBlur={() => void flushSaveNow()}
                       className="w-full rounded-lg border border-[var(--border-subtle)]/70 bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
                     />
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Overall Workout Session Note */}
             <div className="space-y-1">
-              <label
-                htmlFor="workout-session-note"
-                className="block text-xs font-medium text-[var(--text-muted)]"
-              >
-                Workout Session Notes & Gym Summary
-              </label>
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="workout-session-note"
+                  className="block text-xs font-medium text-[var(--text-muted)]"
+                >
+                  Workout Session Notes &amp; Gym Summary
+                </label>
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  Auto-saved &amp; visible in History
+                </span>
+              </div>
               <textarea
                 id="workout-session-note"
                 placeholder="Type any workout notes, PRs hit, energy levels, or coach remarks..."
@@ -2298,6 +2995,7 @@ export default function FitnessDashboard({
                     workout: { ...d.workout, note: e.target.value },
                   }))
                 }
+                onBlur={() => void flushSaveNow()}
                 className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-sky-500 focus:outline-none"
               />
             </div>
@@ -2349,137 +3047,320 @@ export default function FitnessDashboard({
               </label>
             </div>
 
-            {/* Core Calories & Macros Grid */}
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
-              {[
-                {
-                  key: "calories",
-                  targetKey: "calorieTarget",
-                  label: "Calories",
-                  unit: "kcal",
-                  color: "bg-amber-400",
-                  textColor: "text-amber-400",
-                },
-                {
-                  key: "protein",
-                  targetKey: "proteinTarget",
-                  label: "Protein",
-                  unit: "g",
-                  color: "bg-emerald-400",
-                  textColor: "text-emerald-400",
-                },
-                {
-                  key: "carbs",
-                  targetKey: "carbTarget",
-                  label: "Carbs",
-                  unit: "g",
-                  color: "bg-sky-400",
-                  textColor: "text-sky-400",
-                },
-                {
-                  key: "fats",
-                  targetKey: "fatTarget",
-                  label: "Fats",
-                  unit: "g",
-                  color: "bg-purple-400",
-                  textColor: "text-purple-400",
-                },
-                {
-                  key: "waterLiters",
-                  targetKey: "waterTargetLiters",
-                  label: "Hydration",
-                  unit: "L",
-                  color: "bg-cyan-400",
-                  textColor: "text-cyan-400",
-                },
-                {
-                  key: "fiberGrams",
-                  targetKey: "fiberTargetGrams",
-                  label: "Fiber",
-                  unit: "g",
-                  color: "bg-teal-400",
-                  textColor: "text-teal-400",
-                },
-              ].map((item) => {
-                const val = Number(
-                  currentDay.nutrition[
-                    item.key as keyof typeof currentDay.nutrition
-                  ]
-                ) || 0;
-                const target = Number(
-                  currentDay.nutrition[
-                    item.targetKey as keyof typeof currentDay.nutrition
-                  ]
-                ) || 1;
-                const pct = Math.min(100, Math.round((val / target) * 100));
+            {/* 2-Tier Visual Hierarchy: Primary (Calories + Protein) -> Secondary (Carbs, Fats, Hydration, Fiber) */}
+            <div className="space-y-2.5">
+              {/* Tier 1: Calories (Most Prominent) & Protein (2nd Prominent) */}
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                {[
+                  {
+                    key: "calories",
+                    targetKey: "calorieTarget",
+                    label: "Total Calories",
+                    unit: "kcal",
+                    color: "bg-amber-400",
+                    textColor: "text-amber-400",
+                    cardBorder: "border-amber-500/40 bg-amber-500/5",
+                    numberClass: "text-2xl sm:text-3xl font-extrabold",
+                  },
+                  {
+                    key: "protein",
+                    targetKey: "proteinTarget",
+                    label: "Protein",
+                    unit: "g",
+                    color: "bg-emerald-400",
+                    textColor: "text-emerald-400",
+                    cardBorder: "border-emerald-500/35 bg-emerald-500/5",
+                    numberClass: "text-xl sm:text-2xl font-extrabold",
+                  },
+                ].map((item) => {
+                  const val =
+                    Number(
+                      currentDay.nutrition[
+                        item.key as keyof typeof currentDay.nutrition
+                      ]
+                    ) || 0;
+                  const target =
+                    Number(
+                      currentDay.nutrition[
+                        item.targetKey as keyof typeof currentDay.nutrition
+                      ]
+                    ) || 1;
+                  const pct = Math.min(100, Math.round((val / target) * 100));
 
-                return (
-                  <div
-                    key={item.key}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between text-[11px] font-medium text-[var(--text-muted)]">
-                      <span>{item.label}</span>
-                      <span>{pct}%</span>
+                  return (
+                    <div
+                      key={item.key}
+                      className={`rounded-xl border p-3.5 space-y-2 ${item.cardBorder}`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-semibold">
+                        <span className="text-[var(--text-primary)]">
+                          {item.label}
+                        </span>
+                        <span className={item.textColor}>{pct}% of goal</span>
+                      </div>
+
+                      <div className="flex items-baseline gap-1.5">
+                        <DecimalInput
+                          allowDecimal={false}
+                          min={0}
+                          aria-label={`${item.label} Consumed (${item.unit})`}
+                          value={val}
+                          onValueChange={(nextVal) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              nutrition: {
+                                ...d.nutrition,
+                                useMealSum: false,
+                                [item.key]: Math.round(nextVal),
+                              },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className={`w-24 bg-transparent tabular-nums ${item.numberClass} ${item.textColor} focus:outline-none`}
+                        />
+                        <span className="text-xs text-[var(--text-muted)]">
+                          /
+                        </span>
+                        <DecimalInput
+                          allowDecimal={false}
+                          min={1}
+                          aria-label={`${item.label} Target (${item.unit})`}
+                          value={target}
+                          onValueChange={(nextTarget) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              nutrition: {
+                                ...d.nutrition,
+                                [item.targetKey]: Math.round(nextTarget),
+                              },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="w-16 bg-transparent text-sm font-semibold tabular-nums text-[var(--text-muted)] focus:outline-none"
+                        />
+                        <span className="text-xs text-[var(--text-muted)]">
+                          {item.unit}
+                        </span>
+                      </div>
+
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
+                        <div
+                          className={`h-full rounded-full ${item.color} transition-all`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
                     </div>
+                  );
+                })}
+              </div>
 
-                    <div className="flex items-baseline gap-1">
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        aria-label={`${item.label} Consumed (${item.unit})`}
-                        value={val}
-                        onChange={(e) =>
-                          updateCurrentDay((d) => ({
-                            ...d,
-                            nutrition: {
-                              ...d.nutrition,
-                              useMealSum: false,
-                              [item.key]:
-                                Number(
-                                  e.target.value.replace(/[^0-9.]/g, "")
-                                ) || 0,
-                            },
-                          }))
-                        }
-                        className={`w-16 bg-transparent text-lg font-extrabold ${item.textColor} focus:outline-none`}
-                      />
-                      <span className="text-[11px] text-[var(--text-muted)]">
-                        /
-                      </span>
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        aria-label={`${item.label} Target (${item.unit})`}
-                        value={target}
-                        onChange={(e) =>
-                          updateCurrentDay((d) => ({
-                            ...d,
-                            nutrition: {
-                              ...d.nutrition,
-                              [item.targetKey]:
-                                Number(
-                                  e.target.value.replace(/[^0-9.]/g, "")
-                                ) || 0,
-                            },
-                          }))
-                        }
-                        className="w-14 bg-transparent text-xs text-[var(--text-muted)] focus:outline-none"
-                      />
-                      <span className="text-[10px] text-[var(--text-muted)]">
-                        {item.unit}
-                      </span>
+              {/* Tier 2: Compact Secondary Macros & Hydration / Fiber */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  {
+                    key: "carbs",
+                    targetKey: "carbTarget",
+                    label: "Carbs",
+                    unit: "g",
+                    color: "bg-sky-400",
+                    textColor: "text-sky-400",
+                    allowDecimal: false,
+                  },
+                  {
+                    key: "fats",
+                    targetKey: "fatTarget",
+                    label: "Fats",
+                    unit: "g",
+                    color: "bg-purple-400",
+                    textColor: "text-purple-400",
+                    allowDecimal: false,
+                  },
+                  {
+                    key: "waterLiters",
+                    targetKey: "waterTargetLiters",
+                    label: "Hydration",
+                    unit: "L",
+                    color: "bg-cyan-400",
+                    textColor: "text-cyan-400",
+                    allowDecimal: true,
+                  },
+                  {
+                    key: "fiberGrams",
+                    targetKey: "fiberTargetGrams",
+                    label: "Fiber",
+                    unit: "g",
+                    color: "bg-teal-400",
+                    textColor: "text-teal-400",
+                    allowDecimal: true,
+                  },
+                ].map((item) => {
+                  const val =
+                    Number(
+                      currentDay.nutrition[
+                        item.key as keyof typeof currentDay.nutrition
+                      ]
+                    ) || 0;
+                  const target =
+                    Number(
+                      currentDay.nutrition[
+                        item.targetKey as keyof typeof currentDay.nutrition
+                      ]
+                    ) || 1;
+                  const pct = Math.min(100, Math.round((val / target) * 100));
+
+                  return (
+                    <div
+                      key={item.key}
+                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 space-y-1"
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+                        <span>{item.label}</span>
+                        <span>{pct}%</span>
+                      </div>
+
+                      <div className="flex items-baseline gap-1">
+                        <DecimalInput
+                          allowDecimal={item.allowDecimal}
+                          min={0}
+                          aria-label={`${item.label} Consumed (${item.unit})`}
+                          value={val}
+                          onValueChange={(nextVal) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              nutrition: {
+                                ...d.nutrition,
+                                useMealSum: false,
+                                [item.key]: item.allowDecimal
+                                  ? Number(nextVal.toFixed(2))
+                                  : Math.round(nextVal),
+                              },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className={`w-12 bg-transparent text-sm font-bold tabular-nums ${item.textColor} focus:outline-none`}
+                        />
+                        <span className="text-[10px] text-[var(--text-muted)]">
+                          /
+                        </span>
+                        <DecimalInput
+                          allowDecimal={item.allowDecimal}
+                          min={0.5}
+                          aria-label={`${item.label} Target (${item.unit})`}
+                          value={target}
+                          onValueChange={(nextTarget) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              nutrition: {
+                                ...d.nutrition,
+                                [item.targetKey]: item.allowDecimal
+                                  ? Number(nextTarget.toFixed(2))
+                                  : Math.round(nextTarget),
+                              },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="w-10 bg-transparent text-[11px] tabular-nums text-[var(--text-muted)] focus:outline-none"
+                        />
+                        <span className="text-[10px] text-[var(--text-muted)]">
+                          {item.unit}
+                        </span>
+                      </div>
+
+                      <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
+                        <div
+                          className={`h-full rounded-full ${item.color} transition-all`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
                     </div>
+                  );
+                })}
+              </div>
+            </div>
 
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
+            {/* Your Frequently Eaten Daily Staples (Top 5-10 from Actual History + Pins) */}
+            <div className="rounded-xl border border-emerald-500/25 bg-[var(--bg-elevated)] p-3.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs sm:text-sm font-bold text-emerald-400">
+                    Your Frequently Eaten Staples (Top 5–10 From Your Logs)
+                  </h3>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    Built automatically from meals you repeatedly log across days (plus any items you pin with ★ below). Adjust quantity and tap Add.
+                  </p>
+                </div>
+              </div>
+
+              {frequentStaples.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2.5 text-xs text-[var(--text-muted)]">
+                  No recurring personal staples yet. As you add meals below across your days—or click the pin (★) button next to any food in Search—your core 5–10 daily meals appear here for 1-tap logging.
+                </div>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {frequentStaples.map((staple) => {
+                    const qty = stapleQuantities[staple.id] ?? 1;
+                    return (
                       <div
-                        className={`h-full rounded-full ${item.color} transition-all`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
+                        key={staple.id}
+                        className="flex flex-col justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs"
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-1.5">
+                            <span className="font-bold leading-snug">
+                              {staple.name}
+                            </span>
+                            <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">
+                              {staple.isPinned && staple.count <= 1
+                                ? "Pinned"
+                                : `Logged ${staple.count}×`}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+                            {staple.portionLabel} ·{" "}
+                            <strong className="text-amber-400">
+                              {Math.round(staple.calories * qty)} kcal
+                            </strong>{" "}
+                            ·{" "}
+                            <strong className="text-emerald-400">
+                              {Math.round(staple.protein * qty)}g P
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--border-subtle)]/60">
+                          <label className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                            <span>Qty:</span>
+                            <DecimalInput
+                              allowDecimal
+                              min={0.25}
+                              max={20}
+                              aria-label={`Quantity for ${staple.name}`}
+                              value={qty}
+                              onValueChange={(nextQ) =>
+                                setStapleQuantities((prev) => ({
+                                  ...prev,
+                                  [staple.id]: Math.max(0.25, nextQ || 1),
+                                }))
+                              }
+                              className="w-12 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-center font-bold text-[var(--text-primary)]"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              addUserFrequentStapleMeal(staple, qty)
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                          >
+                            <Plus className="h-3 w-3" aria-hidden="true" />
+                            <span>Add</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Open Food Search & Portion Customizer (MyFitnessPal / ICMR-NIN / USDA Standard) */}
@@ -2585,34 +3466,74 @@ export default function FitnessDashboard({
                   ) : (
                     combinedCatalogMatches.slice(0, 10).map((item) => {
                       const isSelected = selectedFoodItem.id === item.id;
+                      const isPinned = (profile.pinnedStaples || []).some(
+                        (p) =>
+                          p.name.trim().toLowerCase() ===
+                          item.name.trim().toLowerCase()
+                      );
                       return (
-                        <button
+                        <div
                           key={item.id}
-                          type="button"
-                          onClick={() => handleSelectFoodItem(item)}
-                          className={`w-full text-left rounded-lg border p-2.5 transition ${
+                          className={`flex items-stretch gap-1 rounded-lg border transition ${
                             isSelected
                               ? "border-amber-400 bg-amber-500/10"
                               : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-amber-500/40"
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-bold text-[var(--text-primary)]">
-                              {item.name}
-                            </span>
-                            <span className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                              {item.source}
-                            </span>
-                          </div>
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
-                            <span>Per 100g:</span>
-                            <strong className="text-amber-400">{item.caloriesPer100g} kcal</strong>
-                            <span className="text-emerald-400">{item.proteinPer100g}g P</span>
-                            <span className="text-sky-400">{item.carbsPer100g}g C</span>
-                            <span className="text-purple-400">{item.fatsPer100g}g F</span>
-                            <span className="text-teal-400">{item.fiberPer100g}g Fib</span>
-                          </div>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectFoodItem(item)}
+                            className="flex-1 text-left p-2.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-bold text-[var(--text-primary)]">
+                                {item.name}
+                              </span>
+                              <span className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                                {item.source}
+                              </span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
+                              <span>Per 100g:</span>
+                              <strong className="text-amber-400">
+                                {item.caloriesPer100g} kcal
+                              </strong>
+                              <span className="text-emerald-400">
+                                {item.proteinPer100g}g P
+                              </span>
+                              <span className="text-sky-400">
+                                {item.carbsPer100g}g C
+                              </span>
+                              <span className="text-purple-400">
+                                {item.fatsPer100g}g F
+                              </span>
+                              <span className="text-teal-400">
+                                {item.fiberPer100g}g Fib
+                              </span>
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => togglePinFoodItem(item)}
+                            title={
+                              isPinned
+                                ? `Unpin ${item.name} from Your Staples`
+                                : `Pin ${item.name} to Your Staples`
+                            }
+                            aria-label={
+                              isPinned
+                                ? `Unpin ${item.name} from staples`
+                                : `Pin ${item.name} to staples`
+                            }
+                            className={`px-2 flex items-center justify-center border-l border-[var(--border-subtle)]/60 rounded-r-lg transition ${
+                              isPinned
+                                ? "text-emerald-400 bg-emerald-500/10"
+                                : "text-[var(--text-muted)] hover:text-emerald-400"
+                            }`}
+                          >
+                            <Pin className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        </div>
                       );
                     })
                   )}
@@ -2678,16 +3599,14 @@ export default function FitnessDashboard({
                       >
                         Base Weight (grams / ml)
                       </label>
-                      <input
+                      <DecimalInput
                         id="food-grams-input"
-                        type="text"
-                        inputMode="numeric"
+                        allowDecimal
+                        min={1}
                         value={customWeightGrams}
-                        onChange={(e) => {
+                        onValueChange={(nextGrams) => {
                           setSelectedPortionIndex(-1);
-                          setCustomWeightGrams(
-                            Number(e.target.value.replace(/[^0-9.]/g, "")) || 0
-                          );
+                          setCustomWeightGrams(Math.max(1, nextGrams));
                         }}
                         className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
                       />
@@ -2701,20 +3620,14 @@ export default function FitnessDashboard({
                         >
                           Qty / Servings
                         </label>
-                        <input
+                        <DecimalInput
                           id="food-quantity-input"
-                          type="text"
-                          inputMode="decimal"
+                          allowDecimal
+                          min={0.25}
+                          max={25}
                           value={foodQuantity}
-                          onChange={(e) =>
-                            setFoodQuantity(
-                              Math.max(
-                                0.25,
-                                Number(
-                                  e.target.value.replace(/[^0-9.]/g, "")
-                                ) || 1
-                              )
-                            )
+                          onValueChange={(nextQty) =>
+                            setFoodQuantity(Math.max(0.25, nextQty || 1))
                           }
                           className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
                         />
@@ -2806,6 +3719,13 @@ export default function FitnessDashboard({
               </div>
 
               <div className="space-y-2">
+                {currentDay.nutrition.meals.length === 0 && (
+                  <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3.5 py-4 text-center text-xs text-[var(--text-muted)]">
+                    No meals logged for {selectedDate} yet. Use{" "}
+                    <strong className="text-emerald-400">Your Frequently Eaten Staples</strong> above, search any food, or click{" "}
+                    <strong className="text-amber-400">Add Custom Meal</strong>.
+                  </div>
+                )}
                 {currentDay.nutrition.meals.map((meal) => (
                   <div
                     key={meal.id}
@@ -2829,6 +3749,7 @@ export default function FitnessDashboard({
                           onChange={(e) =>
                             updateMeal(meal.id, { name: e.target.value })
                           }
+                          onBlur={() => void flushSaveNow()}
                           placeholder="Meal / food items..."
                           className="flex-1 min-w-[140px] bg-transparent text-xs sm:text-sm font-semibold focus:outline-none"
                         />
@@ -2842,104 +3763,80 @@ export default function FitnessDashboard({
                       <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-amber-400">kcal</span>
-                          <input
-                            type="text"
-                            inputMode="numeric"
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
                             value={meal.calories}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                calories:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { calories: Math.round(val) })
                             }
-                            className="w-12 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-12 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-emerald-400">P(g)</span>
-                          <input
-                            type="text"
-                            inputMode="numeric"
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
                             value={meal.protein}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                protein:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { protein: Math.round(val) })
                             }
-                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-sky-400">C(g)</span>
-                          <input
-                            type="text"
-                            inputMode="numeric"
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
                             value={meal.carbs}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                carbs:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { carbs: Math.round(val) })
                             }
-                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-purple-400">F(g)</span>
-                          <input
-                            type="text"
-                            inputMode="numeric"
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
                             value={meal.fats}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                fats:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { fats: Math.round(val) })
                             }
-                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-teal-400">Fib(g)</span>
-                          <input
-                            type="text"
-                            inputMode="decimal"
+                          <DecimalInput
+                            allowDecimal
+                            min={0}
                             value={meal.fiberGrams ?? 0}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                fiberGrams:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { fiberGrams: val })
                             }
-                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
                           <span className="text-[10px] text-cyan-400">H2O(L)</span>
-                          <input
-                            type="text"
-                            inputMode="decimal"
+                          <DecimalInput
+                            allowDecimal
+                            min={0}
                             value={meal.waterLiters ?? 0}
-                            onChange={(e) =>
-                              updateMeal(meal.id, {
-                                waterLiters:
-                                  Number(
-                                    e.target.value.replace(/[^0-9.]/g, "")
-                                  ) || 0,
-                              })
+                            onValueChange={(val) =>
+                              updateMeal(meal.id, { waterLiters: val })
                             }
-                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                            onBlur={() => void flushSaveNow()}
+                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
                           />
                         </label>
                         <button
@@ -2961,6 +3858,7 @@ export default function FitnessDashboard({
                       onChange={(e) =>
                         updateMeal(meal.id, { note: e.target.value })
                       }
+                      onBlur={() => void flushSaveNow()}
                       className="w-full rounded-lg bg-[var(--bg-surface)] px-2.5 py-1 text-xs text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
                     />
                   </div>
@@ -3013,10 +3911,12 @@ export default function FitnessDashboard({
                       <input
                         type="text"
                         aria-label={`${cm.label} Value`}
+                        placeholder="0"
                         value={cm.value}
                         onChange={(e) =>
                           updateCustomMetric(cm.id, { value: e.target.value })
                         }
+                        onBlur={() => void flushSaveNow()}
                         className="w-24 bg-transparent text-base font-bold text-emerald-400 focus:outline-none"
                       />
                       <input
@@ -3026,6 +3926,7 @@ export default function FitnessDashboard({
                         onChange={(e) =>
                           updateCustomMetric(cm.id, { unit: e.target.value })
                         }
+                        onBlur={() => void flushSaveNow()}
                         placeholder="unit"
                         className="w-16 bg-transparent text-xs text-[var(--text-muted)] focus:outline-none"
                       />
@@ -3033,11 +3934,12 @@ export default function FitnessDashboard({
                     <input
                       type="text"
                       aria-label={`Note for ${cm.label}`}
-                      placeholder="Add note..."
+                      placeholder="Optional note..."
                       value={cm.note}
                       onChange={(e) =>
                         updateCustomMetric(cm.id, { note: e.target.value })
                       }
+                      onBlur={() => void flushSaveNow()}
                       className="w-full rounded-md bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-muted)] focus:outline-none"
                     />
                   </div>
@@ -3047,12 +3949,17 @@ export default function FitnessDashboard({
 
             {/* Overall Nutrition Note */}
             <div className="space-y-1">
-              <label
-                htmlFor="nutrition-note"
-                className="block text-xs font-medium text-[var(--text-muted)]"
-              >
-                Nutrition, Hydration & Gut Health Notes
-              </label>
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="nutrition-note"
+                  className="block text-xs font-medium text-[var(--text-muted)]"
+                >
+                  Nutrition, Hydration &amp; Gut Health Notes
+                </label>
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  Auto-saved &amp; visible in History
+                </span>
+              </div>
               <textarea
                 id="nutrition-note"
                 placeholder="Type any notes on appetite, meal timing, supplements, or energy availability..."
@@ -3063,6 +3970,7 @@ export default function FitnessDashboard({
                     nutrition: { ...d.nutrition, note: e.target.value },
                   }))
                 }
+                onBlur={() => void flushSaveNow()}
                 className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-amber-500 focus:outline-none"
               />
             </div>
@@ -3102,18 +4010,19 @@ export default function FitnessDashboard({
                 >
                   Base Sleep Need (hrs):
                 </label>
-                <input
+                <DecimalInput
                   id="baseline-sleep-need"
-                  type="text"
-                  inputMode="decimal"
+                  allowDecimal
+                  min={4}
+                  max={14}
                   value={profile.baselineSleepNeedHours}
-                  onChange={(e) =>
+                  onValueChange={(nextBase) =>
                     updateProfileMeta((p) => ({
                       ...p,
-                      baselineSleepNeedHours:
-                        Number(e.target.value.replace(/[^0-9.]/g, "")) || 7.5,
+                      baselineSleepNeedHours: nextBase > 0 ? nextBase : 7.5,
                     }))
                   }
+                  onBlur={() => void flushSaveNow()}
                   className="w-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-center font-bold text-indigo-400"
                 />
               </div>
@@ -3126,7 +4035,7 @@ export default function FitnessDashboard({
                   Direct Sleep Entry · 70 kg Indian Male Baseline Approximation
                 </div>
                 <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                  Start/Stop sleep timer coming in V2
+                  0–23 hrs supported (decimals like 1.5h or 7.5h allowed)
                 </span>
               </div>
 
@@ -3137,25 +4046,27 @@ export default function FitnessDashboard({
                       htmlFor="sleep-total"
                       className="text-xs font-semibold text-[var(--text-primary)]"
                     >
-                      Total Sleep Duration (hrs)
+                      Total Sleep Duration (0–23 hrs)
                     </label>
                     <span className="text-[11px] text-[var(--text-muted)]">
                       Strain Need: {analysis.requiredSleepHours}h
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <input
+                    <DecimalInput
                       id="sleep-total"
-                      type="text"
-                      inputMode="decimal"
+                      allowDecimal
+                      min={0}
+                      max={23}
                       value={currentDay.sleep.totalHours}
-                      onChange={(e) =>
+                      onValueChange={(nextHours) =>
                         updateSleepWith70kgIndianBaseline(
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
+                          nextHours,
                           currentDay.sleep.sleepQuality
                         )
                       }
-                      className="w-24 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold text-indigo-400 focus:border-indigo-400 focus:outline-none"
+                      onBlur={() => void flushSaveNow()}
+                      className="w-24 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold tabular-nums text-indigo-400 focus:border-indigo-400 focus:outline-none"
                     />
                     <span className="text-xs text-[var(--text-muted)]">
                       hours slept
@@ -3198,20 +4109,21 @@ export default function FitnessDashboard({
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <input
+                    <DecimalInput
                       id="sleep-quality"
-                      type="text"
-                      inputMode="numeric"
+                      allowDecimal={false}
+                      min={1}
+                      max={10}
+                      emptyAsZero={false}
                       value={currentDay.sleep.sleepQuality}
-                      onChange={(e) => {
-                        const raw =
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 1;
+                      onValueChange={(nextQ) =>
                         updateSleepWith70kgIndianBaseline(
                           currentDay.sleep.totalHours,
-                          Math.max(1, Math.min(10, Math.round(raw)))
-                        );
-                      }}
-                      className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold text-amber-400 focus:border-amber-400 focus:outline-none"
+                          Math.max(1, Math.min(10, Math.round(nextQ || 1)))
+                        )
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold tabular-nums text-amber-400 focus:border-amber-400 focus:outline-none"
                     />
                     <span className="text-xs text-[var(--text-muted)]">
                       out of 10
@@ -3259,22 +4171,20 @@ export default function FitnessDashboard({
                   Deep Sleep / SWS (hrs · est.)
                 </label>
                 <div className="mt-1 flex items-baseline gap-1.5">
-                  <input
+                  <DecimalInput
                     id="sleep-deep"
-                    type="text"
-                    inputMode="decimal"
+                    allowDecimal
+                    min={0}
+                    max={12}
                     value={currentDay.sleep.deepSleepHours}
-                    onChange={(e) =>
+                    onValueChange={(val) =>
                       updateCurrentDay((d) => ({
                         ...d,
-                        sleep: {
-                          ...d.sleep,
-                          deepSleepHours:
-                            Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                        },
+                        sleep: { ...d.sleep, deepSleepHours: val },
                       }))
                     }
-                    className="w-16 bg-transparent text-xl font-extrabold text-emerald-400 focus:outline-none"
+                    onBlur={() => void flushSaveNow()}
+                    className="w-16 bg-transparent text-xl font-extrabold tabular-nums text-emerald-400 focus:outline-none"
                   />
                   <span className="text-xs text-[var(--text-muted)]">
                     hrs ({analysis.deepSleepPercentage}% · min {analysis.requiredDeepSleepHours}h)
@@ -3289,22 +4199,20 @@ export default function FitnessDashboard({
                 >
                   REM Sleep (hrs · est.)
                 </label>
-                <input
+                <DecimalInput
                   id="sleep-rem"
-                  type="text"
-                  inputMode="decimal"
+                  allowDecimal
+                  min={0}
+                  max={12}
                   value={currentDay.sleep.remSleepHours}
-                  onChange={(e) =>
+                  onValueChange={(val) =>
                     updateCurrentDay((d) => ({
                       ...d,
-                      sleep: {
-                        ...d.sleep,
-                        remSleepHours:
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                      },
+                      sleep: { ...d.sleep, remSleepHours: val },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-xl font-bold text-sky-400 focus:outline-none"
+                  onBlur={() => void flushSaveNow()}
+                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-sky-400 focus:outline-none"
                 />
               </div>
 
@@ -3315,22 +4223,23 @@ export default function FitnessDashboard({
                 >
                   Resting HR (bpm · 70kg est.)
                 </label>
-                <input
+                <DecimalInput
                   id="sleep-rhr"
-                  type="text"
-                  inputMode="numeric"
+                  allowDecimal={false}
+                  min={0}
+                  max={180}
                   value={currentDay.sleep.restingHeartRate}
-                  onChange={(e) =>
+                  onValueChange={(val) =>
                     updateCurrentDay((d) => ({
                       ...d,
                       sleep: {
                         ...d.sleep,
-                        restingHeartRate:
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
+                        restingHeartRate: Math.round(val),
                       },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-xl font-bold text-rose-400 focus:outline-none"
+                  onBlur={() => void flushSaveNow()}
+                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-rose-400 focus:outline-none"
                 />
               </div>
 
@@ -3341,58 +4250,77 @@ export default function FitnessDashboard({
                 >
                   HRV (ms · 70kg est.)
                 </label>
-                <input
+                <DecimalInput
                   id="sleep-hrv"
-                  type="text"
-                  inputMode="numeric"
+                  allowDecimal={false}
+                  min={0}
+                  max={250}
                   value={currentDay.sleep.hrvMs}
-                  onChange={(e) =>
+                  onValueChange={(val) =>
                     updateCurrentDay((d) => ({
                       ...d,
-                      sleep: {
-                        ...d.sleep,
-                        hrvMs:
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                      },
+                      sleep: { ...d.sleep, hrvMs: Math.round(val) },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-xl font-bold text-teal-400 focus:outline-none"
+                  onBlur={() => void flushSaveNow()}
+                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-teal-400 focus:outline-none"
                 />
               </div>
             </div>
 
-            {/* Sleep Stage Visual Bar & Sufficiency Verdict Box */}
+            {/* Upgraded 3-Signal Actionable Recovery & Sleep Sufficiency Diagnostic */}
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-semibold">
-                  Cross-Module Sufficiency Diagnostic (Sleep × Workout × Nutrition)
+                  Cross-Module Sufficiency Diagnostic (Sleep × Training × Fuel)
                 </span>
                 <span className="text-[11px] text-[var(--text-muted)]">
-                  Start &amp; Stop Sleep Timings scheduled for V2
+                  Physiological Check · Actionable Next-Day Calibration
                 </span>
               </div>
 
-              <div className="grid gap-2.5 sm:grid-cols-2 text-xs">
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+              <div className="grid gap-2.5 md:grid-cols-3 text-xs">
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
                   <div className="font-semibold text-indigo-400">
-                    Is Sleep Sufficient for Today&apos;s Gym Workout?
+                    1. Sleep vs. Training Load ({analysis.strainScore}/21 Strain)
                   </div>
-                  <p className="mt-1 text-[var(--text-muted)] leading-relaxed">
-                    {analysis.isSleepSufficientForWorkout &&
-                    analysis.isDeepSleepSufficient
-                      ? `Yes — Your ${currentDay.sleep.totalHours}h total sleep and ${currentDay.sleep.deepSleepHours}h deep sleep meet the ${analysis.requiredSleepHours}h strain-adjusted recovery requirement for your ${currentDay.workout.gymDurationMinutes}m (${analysis.totalSets}-set) workout.`
-                      : `Not Quite — Your ${currentDay.workout.gymDurationMinutes}m gym session (Strain ${analysis.strainScore}/21) requires ${analysis.requiredSleepHours}h total sleep and ${analysis.requiredDeepSleepHours}h deep sleep. You logged ${currentDay.sleep.totalHours}h total and ${currentDay.sleep.deepSleepHours}h deep.`}
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    {currentDay.sleep.totalHours === 0
+                      ? "Enter your total sleep hours above to see whether rest covers today's workout demand."
+                      : analysis.isSleepSufficientForWorkout &&
+                        analysis.isDeepSleepSufficient
+                      ? `Covered — ${currentDay.sleep.totalHours}h total and ${currentDay.sleep.deepSleepHours}h deep sleep meet the ${analysis.requiredSleepHours}h need for ${analysis.totalSets} sets. Keep progressive overload active.`
+                      : `Sleep Debt (${Math.abs(analysis.sleepDebtDelta).toFixed(1)}h short) — Tonight aim for ${analysis.requiredSleepHours}h total sleep, finish dinner 90m before bed, or hold RIR at 2 reps in reserve tomorrow.`}
                   </p>
                 </div>
 
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
                   <div className="font-semibold text-emerald-400">
-                    Is Nutrition Sufficient for Sleep &amp; Muscle Repair?
+                    2. Protein &amp; Energy Synthesis Check
                   </div>
-                  <p className="mt-1 text-[var(--text-muted)] leading-relaxed">
-                    {analysis.isNutritionSufficientForWorkout
-                      ? `Yes — ${currentDay.nutrition.protein}g protein and ${currentDay.nutrition.calories} kcal provide sufficient amino acid & glycogen availability so overnight growth hormone during deep sleep can repair muscle tissue.`
-                      : `Deficit Detected — With ${analysis.totalSets} sets (${analysis.totalReps} reps) logged today, your current intake (${currentDay.nutrition.calories} kcal, ${currentDay.nutrition.protein}g protein) risks blunting overnight HRV and deep-sleep muscle synthesis.`}
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    {currentDay.nutrition.calories === 0 &&
+                    currentDay.nutrition.protein === 0
+                      ? "Log meals in Module 2 to verify whether overnight amino acid & glycogen supply supports muscle repair."
+                      : analysis.isNutritionSufficientForWorkout
+                      ? `Optimal Anabolic Window — ${currentDay.nutrition.protein}g protein (~${(currentDay.nutrition.protein / 70).toFixed(1)} g/kg for 70 kg) and ${currentDay.nutrition.calories} kcal fuel overnight tissue repair.`
+                      : `Under-Fueled — You are ${Math.max(0, currentDay.nutrition.proteinTarget - currentDay.nutrition.protein)}g protein and ${Math.max(0, currentDay.nutrition.calorieTarget - currentDay.nutrition.calories)} kcal below target; add a protein-rich evening meal before sleeping.`}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
+                  <div className="font-semibold text-teal-400">
+                    3. Autonomic Read (70 kg RHR &amp; HRV Proxy)
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    {currentDay.sleep.totalHours === 0
+                      ? "Waiting for sleep duration + 1–10 rating to model morning Resting HR and HRV balance."
+                      : `Est. RHR ${currentDay.sleep.restingHeartRate} bpm & HRV ${currentDay.sleep.hrvMs} ms (Quality ${currentDay.sleep.sleepQuality}/10). ${
+                          currentDay.sleep.hrvMs >= 58 &&
+                          currentDay.sleep.restingHeartRate <= 64
+                            ? "Parasympathetic rebound looks healthy—cleared for heavy compound intensity + 3L hydration."
+                            : "Elevated sympathetic tone suspected—prioritize morning sunlight, electrolytes, and a 20m Zone 2 walk."
+                        }`}
                   </p>
                 </div>
               </div>
@@ -3400,12 +4328,17 @@ export default function FitnessDashboard({
 
             {/* Sleep Free-Text Note */}
             <div className="space-y-1">
-              <label
-                htmlFor="sleep-note"
-                className="block text-xs font-medium text-[var(--text-muted)]"
-              >
-                Sleep Hygiene, Dreams & Recovery Notes
-              </label>
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="sleep-note"
+                  className="block text-xs font-medium text-[var(--text-muted)]"
+                >
+                  Sleep Hygiene, Dreams &amp; Recovery Notes
+                </label>
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  Auto-saved &amp; visible in History
+                </span>
+              </div>
               <textarea
                 id="sleep-note"
                 placeholder="Type any notes on sleep quality, late meals, caffeine cutoff, room temp, or morning soreness..."
@@ -3416,6 +4349,7 @@ export default function FitnessDashboard({
                     sleep: { ...d.sleep, note: e.target.value },
                   }))
                 }
+                onBlur={() => void flushSaveNow()}
                 className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-indigo-500 focus:outline-none"
               />
             </div>
@@ -3423,7 +4357,7 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            ABOUT US: PITCH, CORE USP, VALUE ADDITION & CLINICAL RESEARCH
+            ABOUT US: PITCH, CORE USP, CLINICAL RESEARCH & FAQS
            ========================================================= */}
         {(activeTab === "all" || activeTab === "research") && (
           <section
@@ -3439,10 +4373,10 @@ export default function FitnessDashboard({
                   id="heading-research"
                   className="text-base font-bold sm:text-lg"
                 >
-                  About Us — Our Pitch, Core USP &amp; Why PulseLoop Exists
+                  About Us — Why PulseLoop &amp; Core Value Proposition
                 </h2>
                 <p className="text-xs text-[var(--text-muted)]">
-                  Hardware-free closed-loop fitness sufficiency built for Indian &amp; global lifters
+                  Hardware-free closed-loop fitness, nutrition &amp; sleep recovery built for Indian and global lifters
                 </p>
               </div>
             </div>
@@ -3457,7 +4391,7 @@ export default function FitnessDashboard({
                   One Connected Recovery Loop Instead of 3 Siloed Apps
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  Gym trackers ignore protein and sleep. Calorie counters ignore training load. PulseLoop connects your Workouts, Nutrition, and Sleep on a single live screen so you know in seconds whether today&apos;s fueling and rest actually support tomorrow&apos;s lift.
+                  Gym trackers ignore protein and sleep. Calorie apps ignore training load. PulseLoop connects Workouts, Nutrition, and Sleep in one mobile-first view so you know immediately whether your food and rest support tomorrow&apos;s performance.
                 </p>
               </div>
 
@@ -3469,7 +4403,7 @@ export default function FitnessDashboard({
                   Global + Indian Nutrition &amp; 70 kg Physiological Calibration
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  Zero ₹25,000+ ring or band lock-in. Search both global USDA foods and Indian staples (Chapati, Dal, Paneer, Idli, Chicken) with real portion gram weights, log clean Exercise × Weight × Reps, and get instant 70 kg Indian adult male RHR, HRV &amp; sleep-stage approximations from simple sleep hours and a 1–10 rating.
+                  No ₹25,000+ wearable lock-in. Search both USDA global foods and Indian kitchen staples with gram-weighted portions, auto-learn your top 5–10 recurring daily foods, carry over previous workout weights, and approximate Resting HR &amp; HRV from simple sleep hours and a 1–10 rating.
                 </p>
               </div>
 
@@ -3478,10 +4412,10 @@ export default function FitnessDashboard({
                   Core Value Addition
                 </div>
                 <div className="text-sm font-bold text-[var(--text-primary)]">
-                  Zero-Friction Custom URLs + Stateful Gemini 4 Coaching
+                  Zero-Friction Custom URLs + Multi-Day Trends + Gemini 4 Coach
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  No sign-up walls or cluttered charts: open any personal or client workspace at <code className="text-sky-400">/u/your-name</code> with instant offline-first auto-save, automatic 6-pillar nutrition totals (Calories, Protein, Carbs, Fats, Hydration, Fiber), and stateful Gemini 4 recovery guidance.
+                  Skip sign-up walls: bookmark a personal URL like <code className="text-sky-400">/u/rahul</code>, inspect 7-day, 14-day, and 30-day trends across Workouts, Nutrition &amp; Sleep, save comments on every module, and run Gemini 4 AI coaching or natural-language logging in one tap.
                 </p>
               </div>
             </div>
@@ -3498,28 +4432,72 @@ export default function FitnessDashboard({
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
                 <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
                   <div className="font-bold text-emerald-400">
-                    WHOOP &amp; Oura Ring — Strain-to-Sleep Sufficiency
+                    Strain-to-Sleep Sufficiency Modeling
                   </div>
                   <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied to Our USP:</strong> Sleep isn&apos;t judged in isolation. Even without a wearable, entering your total sleep hours and 1–10 quality triggers our 70 kg Indian male physiological model (Resting HR, HRV, Deep &amp; REM estimates) and checks it against your daytime gym strain.
+                    <strong>Best Practice Applied:</strong> Sleep is evaluated against training stress, not an arbitrary fixed number. Entering sleep duration (0–23 hrs) and 1–10 quality calibrates estimated Deep Sleep, REM, Resting HR (~62 bpm baseline), and HRV (~60 ms baseline) for a 70 kg Indian adult male and compares them with daily Gym Strain.
                   </p>
                 </div>
 
                 <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
                   <div className="font-bold text-amber-400">
-                    MyFitnessPal, Livestrong &amp; ICMR-NIN / USDA Standards
+                    ICMR-NIN India &amp; USDA Global Nutrition Standards
                   </div>
                   <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied to Our USP:</strong> Open food discovery shouldn&apos;t miss home-cooked Indian meals or Western staples. Searching any food returns standardized ICMR-NIN &amp; USDA macros with gram-weighted portions that automatically roll up into Calories, Protein, Carbs, Fats, Hydration, and Fiber.
+                    <strong>Best Practice Applied:</strong> Open search combines ICMR-NIN Indian nutrition tables with USDA FoodData Central so home meals and gym staples use verified portion weights and automatically sum into Calories, Protein, Carbs, Fats, Hydration, and Fiber.
                   </p>
                 </div>
 
                 <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
                   <div className="font-bold text-sky-400">
-                    Hevy &amp; Clinical Coaching — Zero-Bloat Inline Execution
+                    Progressive Overload &amp; Frictionless Mobile Logging
                   </div>
                   <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied to Our USP:</strong> Lifters want fast Exercise, Weight, and Reps tracking—not distracting RPE/volume math on every row. Paired with instant <code className="text-sky-400">Optimal</code> / <code className="text-amber-400">Borderline</code> / <code className="text-rose-400">Deficit</code> status banners and ubiquitous inline notes, tracking takes under 15 seconds.
+                    <strong>Best Practice Applied:</strong> Compact iPhone-friendly Exercise × Weight × Reps rows automatically pull forward your previous session&apos;s numbers so every workout starts where you left off—free of bloated charts or sluggish forms.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Simple How-To & FAQs (With Real Custom URL Example) */}
+            <div className="space-y-3 pt-1">
+              <h3 className="text-sm font-bold text-emerald-400">
+                Quick Guide &amp; Frequently Asked Questions (FAQs)
+              </h3>
+              <div className="grid gap-2.5 md:grid-cols-2 text-xs">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
+                  <div className="font-bold text-[var(--text-primary)]">
+                    Q1. How does &ldquo;Custom URL&rdquo; work? (Real Example)
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    Click <strong>Custom URL</strong> in the top bar and type a name like <code className="text-emerald-400">rahul</code> to open <code className="text-emerald-400">/u/rahul</code>. Bookmark that link on your iPhone home screen—every workout, meal, sleep entry, and saved note stays in its own private workspace. Coaches can create <code className="text-emerald-400">/u/client-ananya</code> to share a separate tracker with a client with zero login friction.
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
+                  <div className="font-bold text-[var(--text-primary)]">
+                    Q2. Why does a new day start empty, and how do my Food Staples work?
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    Nothing is fake or pre-filled so your calorie and strain numbers reflect real intake only. As you log foods across days (or click the Pin icon next to a search result), your top 5–10 recurring meals automatically populate under <strong>Your Frequently Eaten Staples</strong> for 1-tap logging with adjustable quantity.
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
+                  <div className="font-bold text-[var(--text-primary)]">
+                    Q3. How are Gym Strain (/21) and Readiness (%) scored?
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    <strong>Gym Strain (0–21)</strong> rises logarithmically with gym duration, completed sets/reps, and cardio minutes (so going from 0 to 12 sets moves fast, while marathon sessions taper near 21). <strong>Readiness (12–99%)</strong> blends Sleep Duration &amp; Deep Sleep ratio against strain-adjusted need, protein &amp; calorie fueling coverage, and subjective sleep quality.
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
+                  <div className="font-bold text-[var(--text-primary)]">
+                    Q4. How do I view multi-week progress &amp; carry over previous weights?
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    Open the <strong>History &amp; Trends</strong> tab to switch between 7-Day (Week), 14-Day (2 Weeks), and 30-Day (Month) consolidated totals, lift progression, and all saved notes. Inside <strong>1. Workouts</strong>, tap <strong>Load Prev</strong> or add an exercise by name to automatically pre-fill your last logged weights and reps.
                   </p>
                 </div>
               </div>

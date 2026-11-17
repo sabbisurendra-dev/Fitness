@@ -223,9 +223,9 @@ assert.equal(extremeRes.totalSets, 30);
 assert.equal(extremeRes.totalVolume, 30000);
 assert(extremeRes.readinessScore >= 12 && extremeRes.readinessScore <= 99);
 
-// 5. Verify 70 kg Indian Male Sleep Biometric Approximation & V1 Feature Checks
+// 5. Verify 70 kg Indian Male Sleep Biometric Approximation (0-23h) & V2 Feature Checks
 function approximateSleepBiometricsForIndianMale70kg(totalHours, sleepQuality) {
-  const hours = Math.max(0, Math.min(16, Number(totalHours) || 0));
+  const hours = Math.max(0, Math.min(23, Number(totalHours) || 0));
   const quality = Math.max(1, Math.min(10, Number(sleepQuality) || 7));
   const deepRatio = 0.15 + (quality / 10) * 0.065;
   const remRatio = 0.18 + (quality / 10) * 0.05;
@@ -237,12 +237,18 @@ function approximateSleepBiometricsForIndianMale70kg(totalHours, sleepQuality) {
   const awakeMinutes =
     hours === 0 ? 0 : Math.max(5, Math.round(35 - quality * 2.2));
   const sleepDelta = Math.max(-2.5, Math.min(2.0, hours - 6.5));
-  const restingHeartRate = Math.round(
-    Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
-  );
-  const hrvMs = Math.round(
-    Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
-  );
+  const restingHeartRate =
+    hours === 0
+      ? 0
+      : Math.round(
+          Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
+        );
+  const hrvMs =
+    hours === 0
+      ? 0
+      : Math.round(
+          Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
+        );
   return {
     deepSleepHours,
     remSleepHours,
@@ -259,13 +265,31 @@ assert.equal(baseline70kg.hrvMs, 60, "70 kg Indian baseline HRV should be 60 ms"
 assert.equal(baseline70kg.deepSleepHours, 1.5);
 assert.equal(baseline70kg.remSleepHours, 1.6);
 
-const poorSleep70kg = approximateSleepBiometricsForIndianMale70kg(0, 2);
-assert.equal(poorSleep70kg.deepSleepHours, 0);
-assert.equal(poorSleep70kg.awakeMinutes, 0);
-assert(poorSleep70kg.restingHeartRate >= 48 && poorSleep70kg.restingHeartRate <= 84);
-assert(poorSleep70kg.hrvMs >= 25 && poorSleep70kg.hrvMs <= 95);
+const zeroSleep70kg = approximateSleepBiometricsForIndianMale70kg(0, 2);
+assert.equal(zeroSleep70kg.deepSleepHours, 0);
+assert.equal(zeroSleep70kg.awakeMinutes, 0);
+assert.equal(zeroSleep70kg.restingHeartRate, 0);
+assert.equal(zeroSleep70kg.hrvMs, 0);
 
-// Verify Workouts removed RPE/Volume table headers, Nutrition DB exists with Indian+Global foods, and About Us kept Industry Research
+const longSleep70kg = approximateSleepBiometricsForIndianMale70kg(23, 8);
+assert(longSleep70kg.deepSleepHours > 4.0, "Sleep duration up to 23 hours supported without 16h cap");
+assert(longSleep70kg.restingHeartRate >= 48 && longSleep70kg.restingHeartRate <= 84);
+assert(longSleep70kg.hrvMs >= 25 && longSleep70kg.hrvMs <= 95);
+
+// Verify Workouts removed RPE/Volume table headers, Nutrition DB & User Staples exist, and V2 UI invariants hold
+const typesCode = fs.readFileSync(path.join(root, "src/lib/types.ts"), "utf-8");
+assert(typesCode.includes("Math.min(23"), "types.ts sleep approximation supports up to 23h");
+assert(typesCode.includes("meals: []"), "Fresh day starts with empty meals");
+assert(typesCode.includes("exercises: []"), "Fresh day starts with empty exercises");
+
+const historyStaplesCode = fs.readFileSync(
+  path.join(root, "src/lib/historyAndStaples.ts"),
+  "utf-8"
+);
+assert(historyStaplesCode.includes("computePeriodSummary"), "History period summary exported");
+assert(historyStaplesCode.includes("findPreviousWorkoutSession"), "Workout session retention exported");
+assert(historyStaplesCode.includes("computeUserFrequentStaples"), "User frequent staples calculation exported");
+
 const nutritionDbCode = fs.readFileSync(
   path.join(root, "src/lib/nutritionDatabase.ts"),
   "utf-8"
@@ -278,6 +302,10 @@ assert(nutritionDbCode.includes("USDA Global"), "USDA Global standard tagged");
 
 assert(!dashboardCode.includes('id="session-rpe"'), "Workouts session RPE removed");
 assert(!dashboardCode.includes("Set ${sIdx + 1} RPE"), "Workouts table RPE removed");
+assert(!dashboardCode.includes("WHOOP / Oura / Clinical Sufficiency Engine"), "Jargon removed from top card");
+assert(!dashboardCode.includes("Hide Gemini AI Hub"), "Hide Gemini AI Hub button removed from top card");
+assert(dashboardCode.includes("Light Mode") && dashboardCode.includes("Dark Mode"), "Theme toggle includes clear text label");
+assert(dashboardCode.includes("History &amp; Trends") || dashboardCode.includes("History & Trends"), "History & Trends tab present");
 assert(dashboardCode.includes("About Us"), "About Us section present");
 assert(
   dashboardCode.includes("Industry Market Research &amp; Clinical Best Practices Applied") ||

@@ -132,12 +132,27 @@ export interface DailyEntry {
   updatedAt: string;
 }
 
+export interface PinnedFoodStaple {
+  id: string;
+  name: string;
+  caloriesPer100g: number;
+  proteinPer100g: number;
+  carbsPer100g: number;
+  fatsPer100g: number;
+  fiberPer100g: number;
+  waterLitersPer100g: number;
+  defaultPortionLabel: string;
+  defaultGrams: number;
+  source: string;
+}
+
 export interface UserProfileStore {
   slug: string;
   displayName: string;
   weightUnit: "kg" | "lbs";
   bodyweight: number;
   baselineSleepNeedHours: number;
+  pinnedStaples?: PinnedFoodStaple[];
   days: Record<string, DailyEntry>;
   updatedAt: string;
 }
@@ -188,7 +203,7 @@ export function approximateSleepBiometricsForIndianMale70kg(
   restingHeartRate: number;
   hrvMs: number;
 } {
-  const hours = Math.max(0, Math.min(16, Number(totalHours) || 0));
+  const hours = Math.max(0, Math.min(23, Number(totalHours) || 0));
   const quality = Math.max(1, Math.min(10, Number(sleepQuality) || 7));
 
   const deepRatio = 0.15 + (quality / 10) * 0.065;
@@ -204,12 +219,18 @@ export function approximateSleepBiometricsForIndianMale70kg(
 
   // Calibrated for a healthy 70 kg Indian adult male baseline (62 bpm RHR, 60 ms HRV at 7.5h, 8/10 quality)
   const sleepDelta = Math.max(-2.5, Math.min(2.0, hours - 6.5));
-  const restingHeartRate = Math.round(
-    Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
-  );
-  const hrvMs = Math.round(
-    Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
-  );
+  const restingHeartRate =
+    hours === 0
+      ? 0
+      : Math.round(
+          Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
+        );
+  const hrvMs =
+    hours === 0
+      ? 0
+      : Math.round(
+          Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
+        );
 
   return {
     deepSleepHours,
@@ -222,167 +243,70 @@ export function approximateSleepBiometricsForIndianMale70kg(
 }
 
 export function createDefaultDailyEntry(date: string): DailyEntry {
-  const defaultSleepHours = 7.5;
-  const defaultSleepQuality = 8;
-  const approxSleep = approximateSleepBiometricsForIndianMale70kg(
-    defaultSleepHours,
-    defaultSleepQuality
-  );
-
   return {
     date,
     dailyNote: "",
     workout: {
-      gymDurationMinutes: 65,
-      sessionTitle: "Upper Body Strength & Hypertrophy",
-      sessionRpe: 8,
-      cardioMinutes: 15,
-      cardioType: "Incline Treadmill Walk",
-      note: "Felt strong on pressing movements. Focused on 2-second controlled eccentrics.",
-      exercises: [
-        {
-          id: "ex-1",
-          name: "Barbell Bench Press",
-          muscleGroup: "Chest",
-          note: "Paused 1s on chest; wrists stacked",
-          sets: [
-            { id: "s-1", weight: 80, reps: 10, rpe: 7.5, completed: true },
-            { id: "s-2", weight: 85, reps: 8, rpe: 8.5, completed: true },
-            { id: "s-3", weight: 85, reps: 8, rpe: 9, completed: true },
-          ],
-        },
-        {
-          id: "ex-2",
-          name: "Lat Pulldown (Wide Grip)",
-          muscleGroup: "Back",
-          note: "Full stretch at top, pull to upper chest",
-          sets: [
-            { id: "s-4", weight: 65, reps: 12, rpe: 8, completed: true },
-            { id: "s-5", weight: 70, reps: 10, rpe: 8.5, completed: true },
-            { id: "s-6", weight: 70, reps: 10, rpe: 9, completed: true },
-          ],
-        },
-        {
-          id: "ex-3",
-          name: "Incline Dumbbell Press",
-          muscleGroup: "Chest / Shoulders",
-          note: "30-degree bench angle",
-          sets: [
-            { id: "s-7", weight: 30, reps: 10, rpe: 8, completed: true },
-            { id: "s-8", weight: 32.5, reps: 9, rpe: 9, completed: true },
-          ],
-        },
-      ],
+      gymDurationMinutes: 0,
+      sessionTitle: "",
+      sessionRpe: 7,
+      cardioMinutes: 0,
+      cardioType: "",
+      note: "",
+      exercises: [],
     },
     nutrition: {
-      calories: 2350,
+      calories: 0,
       calorieTarget: 2450,
-      protein: 175,
+      protein: 0,
       proteinTarget: 170,
-      carbs: 250,
+      carbs: 0,
       carbTarget: 260,
-      fats: 72,
+      fats: 0,
       fatTarget: 75,
-      waterLiters: 3.4,
+      waterLiters: 0,
       waterTargetLiters: 3.5,
-      fiberGrams: 32,
+      fiberGrams: 0,
       fiberTargetGrams: 30,
       useMealSum: true,
-      note: "Pre-workout carbs 90m before gym; high-protein dinner 3h before bed.",
-      meals: [
-        {
-          id: "m-1",
-          time: "08:30",
-          name: "Oats, Whey Isolate, Berries & Chia",
-          calories: 620,
-          protein: 48,
-          carbs: 78,
-          fats: 14,
-          fiberGrams: 11,
-          waterLiters: 0.3,
-          portionLabel: "1 large bowl (350g)",
-          weightGrams: 350,
-          note: "Pre-workout fuel",
-        },
-        {
-          id: "m-2",
-          time: "13:15",
-          name: "Grilled Chicken Breast, Jasmine Rice & Avocado",
-          calories: 840,
-          protein: 64,
-          carbs: 88,
-          fats: 24,
-          fiberGrams: 10,
-          waterLiters: 0.3,
-          portionLabel: "1 plate (420g)",
-          weightGrams: 420,
-          note: "Post-workout recovery meal",
-        },
-        {
-          id: "m-3",
-          time: "19:30",
-          name: "Salmon Fillet, Sweet Potato & Steamed Broccoli",
-          calories: 890,
-          protein: 63,
-          carbs: 84,
-          fats: 34,
-          fiberGrams: 11,
-          waterLiters: 0.3,
-          portionLabel: "1 dinner plate (450g)",
-          weightGrams: 450,
-          note: "Finished eating 3 hrs before sleep for HRV optimization",
-        },
-        {
-          id: "m-4",
-          time: "21:00",
-          name: "Drinking Water & Electrolytes",
-          calories: 0,
-          protein: 0,
-          carbs: 0,
-          fats: 0,
-          fiberGrams: 0,
-          waterLiters: 2.5,
-          portionLabel: "10 glasses (2500ml)",
-          weightGrams: 2500,
-          note: "Daily hydration tracked across training & recovery",
-        },
-      ],
+      note: "",
+      meals: [],
       customMetrics: [
         {
           id: "cm-1",
           label: "Creatine Monohydrate",
-          value: "5",
+          value: "",
           unit: "g",
-          note: "Taken post-workout",
+          note: "",
         },
         {
           id: "cm-2",
           label: "Daily Steps",
-          value: "10,850",
+          value: "",
           unit: "steps",
-          note: "Active outdoor recovery walk",
+          note: "",
         },
         {
           id: "cm-3",
           label: "Electrolytes / Sodium",
-          value: "1,000",
+          value: "",
           unit: "mg",
-          note: "Intra-workout hydration",
+          note: "",
         },
       ],
     },
     sleep: {
-      totalHours: defaultSleepHours,
-      deepSleepHours: approxSleep.deepSleepHours,
-      remSleepHours: approxSleep.remSleepHours,
-      lightSleepHours: approxSleep.lightSleepHours,
-      awakeMinutes: approxSleep.awakeMinutes,
-      sleepQuality: defaultSleepQuality,
-      bedtime: "22:45",
-      wakeTime: "06:15",
-      restingHeartRate: approxSleep.restingHeartRate,
-      hrvMs: approxSleep.hrvMs,
-      note: "Approximated for a standard 70 kg Indian man (7.5h sleep, 8/10 quality). Edit anytime if wearable metrics differ.",
+      totalHours: 0,
+      deepSleepHours: 0,
+      remSleepHours: 0,
+      lightSleepHours: 0,
+      awakeMinutes: 0,
+      sleepQuality: 7,
+      bedtime: "",
+      wakeTime: "",
+      restingHeartRate: 0,
+      hrvMs: 0,
+      note: "",
     },
     aiCoach: {
       messages: [],
@@ -590,26 +514,26 @@ export function calculateSufficiencyAnalysis(
     clinicalPillarChecks: {
       sleepVsStrain: {
         status: sleepVsStrainStatus,
-        label: `Total Sleep vs. Strain (${actualSleep}h / ${requiredSleepHours}h needed)`,
+        label: `Sleep vs. Training Load (${actualSleep}h / ${requiredSleepHours}h)`,
         detail:
           sleepDebtDelta >= 0
-            ? `+${sleepDebtDelta}h surplus for ${totalActiveMinutes}m gym strain`
-            : `${sleepDebtDelta}h sleep debt for ${totalActiveMinutes}m gym strain`,
+            ? `+${sleepDebtDelta}h surplus covering ${totalActiveMinutes}m activity`
+            : `${Math.abs(sleepDebtDelta)}h below today's ${requiredSleepHours}h recovery target`,
       },
       deepSleepRepair: {
         status: deepSleepStatus,
-        label: `Deep Sleep SWS Repair (${actualDeepSleep}h · ${deepSleepPercentage}%)`,
+        label: `Deep Sleep Repair (${actualDeepSleep}h · ${deepSleepPercentage}%)`,
         detail:
           actualDeepSleep >= requiredDeepSleepHours
-            ? `Meets ${requiredDeepSleepHours}h clinical muscle-repair target`
-            : `Target ${requiredDeepSleepHours}h+ deep sleep after ${totalSets} working sets`,
+            ? `Meets ${requiredDeepSleepHours}h tissue-repair target`
+            : `Aim for ${requiredDeepSleepHours}h+ deep sleep after ${totalSets} sets`,
       },
       nutritionVsStrain: {
         status: nutritionVsStrainStatus,
-        label: `Fuel & Protein Availability (${nutrition.protein}g P · ${nutrition.calories} kcal)`,
+        label: `Fuel & Protein (${nutrition.calories} kcal · ${nutrition.protein}g P)`,
         detail: isNutritionSufficientForWorkout
-          ? `Sufficient protein & energy availability for hypertrophy`
-          : `Need +${Math.max(0, nutrition.proteinTarget - nutrition.protein)}g P & +${Math.max(0, nutrition.calorieTarget - nutrition.calories)} kcal for strain recovery`,
+          ? `Calories & protein cover today's muscle recovery`
+          : `Need +${Math.max(0, nutrition.calorieTarget - nutrition.calories)} kcal & +${Math.max(0, nutrition.proteinTarget - nutrition.protein)}g P`,
       },
     },
   };
