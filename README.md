@@ -16,8 +16,8 @@
 | [docs/MVP_V1_SPECIFICATION.md](docs/MVP_V1_SPECIFICATION.md) | Complete MVP v1 Product, Sufficiency Formula, UI Module, Storage, AI & Resume-Work Specification |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Market Research Synthesis (WHOOP, Oura, Apple, Garmin, Samsung, Fitbit, Hevy, MacroFactor, Cronometer, TrueCoach) & Architectural Decisions |
 | [docs/MARKET_RESEARCH_AI_EMPLOYEES.md](docs/MARKET_RESEARCH_AI_EMPLOYEES.md) | Project-Scoped AI Employee Organization, File Ownership Matrix & Top 1% Operating Playbooks |
-| [docs/MVP_V1.md](docs/MVP_V1.md) | Product Manager Cumulative Prompt Ledger, OST, JTBD & Shape Up Acceptance Criteria |
-| [artifacts/](artifacts/) | Preserved Antigravity Brain Artifacts (`mvp_v1_document.md`, `implementation_plan.md`) & Browser Verification Evidence (`final_step_18.png`) |
+| [docs/MVP_V1.md](docs/MVP_V1.md) | Product Manager Cumulative Prompt Ledger, OST, JTBD, Updated 3-Feature V1 Specs & Acceptance Criteria |
+| [artifacts/](artifacts/) | Preserved Antigravity Brain Artifacts (`MVP_V1.md`, `Market_Research_AI_Employees.md`, `mvp_v1_document.md`, `implementation_plan.md`) & Browser Verification Evidence (`final_step_18.png`) |
 | [AGENTS.md](AGENTS.md) | Gemini 4 SDK (`@google/genai`) & Secret Hygiene Rules |
 | [.agents/rules/qa-gates.md](.agents/rules/qa-gates.md) | Mandatory Post-Edit UX & Technical QA Verification Gates |
 | [.agents/rules/ai-employees-org.md](.agents/rules/ai-employees-org.md) | Progressive Disclosure & Multi-Employee Routing Protocol |
@@ -27,21 +27,21 @@
 ## Core Features Built in MVP v1
 
 1. **Top Closed-Loop Sufficiency & Readiness Engine (`src/lib/types.ts` — `calculateSufficiencyAnalysis`)**
-   - Computes WHOOP-inspired **0–21 Strain** from gym/cardio minutes, completed sets (`completed === true`), and session RPE.
+   - Computes WHOOP-inspired **0–21 Strain** from gym/cardio minutes and completed sets (`completed === true`).
    - Dynamically raises **Strain-Adjusted Sleep Need** (`+0` to `+0.8 hrs`) and **Deep Sleep (SWS) Repair Threshold** (`1.1h–1.5h`) as workout load rises.
    - Checks **Nutrition-to-Strain Sufficiency** (`82–88%` calories and `85–92%` protein by strain tier) and outputs a bounded **Readiness Score (12–99%)**, 3 clinical pillar checks, and a plain-English verdict (`Optimal Recovery Loop`, `Borderline Sufficiency`, or `Recovery / Fueling Deficit`).
-2. **Module 1: Workouts & Gym Session (`src/components/FitnessDashboard.tsx`)**
-   - Inline session title, gym minutes, session RPE, cardio minutes/type, `KG`/`LBS` unit toggle, and 8 quick-add exercise presets.
-   - Hevy-style inline `Set × Weight × Reps × RPE × Volume × Done ✓` table with per-exercise notes and auto-growing session notes.
-3. **Module 2: Nutrition, Macros & Health Metrics**
-   - 6 inline editable cards (**Calories, Protein, Carbs, Fats, Hydration, Fiber**) with target tracking and progress bars.
-   - Hybrid **`useMealSum`** mode: auto-sums from meal rows when enabled, or automatically yields to direct manual overrides when typing into top macro cards.
-   - Custom health/supplement metrics (`Creatine`, `Daily Steps`, `Electrolytes`) and inline notes everywhere.
-4. **Module 3: Sleep Architecture & Recovery Diagnostic**
-   - Configurable **Base Sleep Need**, **Total Sleep**, **Deep Sleep (SWS)**, **REM**, **Sleep Quality**, **Resting HR**, **HRV**, **Bedtime/Wake**, cross-pillar diagnostics, and sleep hygiene notes.
-5. **Module 4 & Gemini 4 Interactions AI Hub (`src/app/api/gemini/route.ts`)**
-   - Uses official `@google/genai` (`^3.4.0`) `client.interactions.create` with Gemini 4 models (`gemini-4-hydrogen`, `gemini-4-argon`, `gemini-4-carbon`) and deterministic offline fallbacks.
-   - Supports **`optimize-day`** (structured recovery prescription + 1-click meal/exercise logging), **`smart-log`** (NLP parser updating workouts, meals, and sleep), and stateful multi-turn **`coach`** (`previous_interaction_id`).
+2. **Feature 1: `1. Workouts` (`src/components/FitnessDashboard.tsx`)**
+   - Simple, zero-bloat **Exercise Name, Weight & Reps** logger (RPE and Volume UI removed per V1 feedback) with `KG`/`LBS` toggle, `+ Set` / Delete buttons, 8 quick-add presets, gym & cardio minutes, per-exercise notes, and auto-growing session notes.
+3. **Feature 2: `2. Nutrition` (`src/lib/nutritionDatabase.ts`, `src/app/api/gemini/route.ts`)**
+   - **Open Food Search & Portion Calculator** backed by **ICMR-NIN (India)** + **USDA Global** standards plus live Gemini 4 `food-search` lookup (`Fetch Any Food` with offline fallback).
+   - Select portion sizes with explicit gram/ml weights, adjust servings or custom grams, and automatically combine and sum all 6 cards (**Calories, Protein, Carbs, Fats, Hydration, Fiber**).
+   - Hybrid **`useMealSum`** mode automatically yields to manual overrides when typing directly into top macro cards.
+4. **Feature 3: `3. Sleep & Recovery` (`src/lib/types.ts` — `approximateSleepBiometricsForIndianMale70kg`)**
+   - Direct **Total Sleep Duration (hrs)** entry with quick-tap hour pills (`5.5h`–`9h`) and **1–10 Sleep Quality** rating selector (start/stop sleep timer scheduled for V2).
+   - Automatically approximates **Deep Sleep (SWS)**, **REM Sleep**, **Resting HR (~62 bpm baseline)**, and **HRV (~60 ms baseline)** calibrated for a standard **70 kg Indian man**, with inline overrides if wearing a tracker.
+5. **Feature 4: `About Us` & Gemini 4 Interactions AI Hub (`src/app/api/gemini/route.ts`)**
+   - Replaces `Market Benchmarks` tab with **`About Us`**, presenting **The Pitch**, **Our Core USP**, **Core Value Addition**, and the retained & USP-aligned **Industry Market Research & Clinical Best Practices Applied**.
+   - Official `@google/genai` (`^3.4.0`) `client.interactions.create` with Gemini 4 models (`gemini-4-hydrogen`, `gemini-4-argon`, `gemini-4-carbon`) supporting **`optimize-day`**, **`smart-log`**, and stateful **`coach`** (`previous_interaction_id`) with deterministic offline fallbacks.
 6. **Multi-User URLs & 3-Tier Auto-Save (`src/app/api/state/route.ts`)**
    - Instant `0ms` `localStorage` cache + `380ms` debounced sync -> `/tmp/pulse-loop-fitness-<slug>.json` -> Vercel Blob (`pulse-loop-fitness-store`, `fitness-profiles/<slug>.json`).
    - Adaptive `light-dark()` Dark/Light theme with zero FOUC and mobile-first responsive grids (`360px` / `768px` / `1280px`).

@@ -7,6 +7,10 @@ import {
   UserProfileStore,
   calculateSufficiencyAnalysis,
 } from "@/lib/types";
+import {
+  FoodDatabaseItem,
+  searchFoodsCatalog,
+} from "@/lib/nutritionDatabase";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +21,7 @@ const ALLOWED_MODELS = [
 ] as const;
 
 type AllowedGeminiModel = (typeof ALLOWED_MODELS)[number];
-type GeminiMode = "optimize-day" | "smart-log" | "coach";
+type GeminiMode = "optimize-day" | "smart-log" | "coach" | "food-search";
 
 interface SmartLogExercise {
   name: string;
@@ -261,6 +265,104 @@ function buildFallbackSmartLog(
   };
 }
 
+function buildFallbackFoodSearch(query: string): FoodDatabaseItem {
+  const localMatches = searchFoodsCatalog(query);
+  if (localMatches.length > 0) {
+    return localMatches[0];
+  }
+
+  const lower = query.toLowerCase();
+  const isBeverage =
+    lower.includes("juice") ||
+    lower.includes("lassi") ||
+    lower.includes("smoothie") ||
+    lower.includes("shake") ||
+    lower.includes("tea") ||
+    lower.includes("coffee") ||
+    lower.includes("milk") ||
+    lower.includes("water") ||
+    lower.includes("soup");
+  const isHighProtein =
+    lower.includes("chicken") ||
+    lower.includes("fish") ||
+    lower.includes("mutton") ||
+    lower.includes("egg") ||
+    lower.includes("paneer") ||
+    lower.includes("tofu") ||
+    lower.includes("prawns") ||
+    lower.includes("soy") ||
+    lower.includes("steak") ||
+    lower.includes("turkey") ||
+    lower.includes("whey");
+
+  const title = query
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 64)
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  if (isBeverage) {
+    return {
+      id: `food-custom-${Date.now()}`,
+      name: title,
+      aliases: [lower],
+      category: "Hydration & Beverages",
+      source: "ICMR-NIN & USDA",
+      caloriesPer100g: 48,
+      proteinPer100g: 2.2,
+      carbsPer100g: 7.5,
+      fatsPer100g: 0.9,
+      fiberPer100g: 0.4,
+      waterLitersPer100g: 0.09,
+      portions: [
+        { label: "1 glass / cup (250ml)", grams: 250 },
+        { label: "1 small cup (150ml)", grams: 150 },
+        { label: "1 large bottle (400ml)", grams: 400 },
+      ],
+    };
+  }
+
+  if (isHighProtein) {
+    return {
+      id: `food-custom-${Date.now()}`,
+      name: title,
+      aliases: [lower],
+      category: "Proteins, Poultry & Fish",
+      source: "ICMR-NIN & USDA",
+      caloriesPer100g: 175,
+      proteinPer100g: 22.0,
+      carbsPer100g: 2.5,
+      fatsPer100g: 8.2,
+      fiberPer100g: 0.4,
+      waterLitersPer100g: 0.064,
+      portions: [
+        { label: "1 medium portion (150g)", grams: 150 },
+        { label: "100g portion (100g)", grams: 100 },
+        { label: "1 large serving (220g)", grams: 220 },
+      ],
+    };
+  }
+
+  return {
+    id: `food-custom-${Date.now()}`,
+    name: title,
+    aliases: [lower],
+    category: "Indian Staples & Meals",
+    source: "ICMR-NIN & USDA",
+    caloriesPer100g: 145,
+    proteinPer100g: 5.5,
+    carbsPer100g: 21.0,
+    fatsPer100g: 4.2,
+    fiberPer100g: 2.8,
+    waterLitersPer100g: 0.068,
+    portions: [
+      { label: "1 medium katori / bowl (150g)", grams: 150 },
+      { label: "100g standard serving (100g)", grams: 100 },
+      { label: "1 full plate serving (250g)", grams: 250 },
+    ],
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -271,7 +373,12 @@ export async function POST(req: NextRequest) {
       typeof body?.date === "string" && body.date
         ? body.date
         : new Date().toISOString().slice(0, 10);
-    const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+    const prompt =
+      typeof body?.prompt === "string"
+        ? body.prompt.trim()
+        : typeof body?.query === "string"
+        ? body.query.trim()
+        : "";
     const previousInteractionId =
       typeof body?.previousInteractionId === "string" &&
       body.previousInteractionId &&
@@ -279,41 +386,58 @@ export async function POST(req: NextRequest) {
         ? body.previousInteractionId
         : undefined;
 
-    const entry = body?.entry as DailyEntry | undefined;
-    const profile = body?.profile as UserProfileStore | undefined;
-
-    if (!entry || !profile) {
-      return NextResponse.json(
-        { error: "Missing entry or profile telemetry payload." },
-        { status: 400 }
-      );
-    }
-
-    if (!["optimize-day", "smart-log", "coach"].includes(mode)) {
+    if (!["optimize-day", "smart-log", "coach", "food-search"].includes(mode)) {
       return NextResponse.json(
         { error: "Unsupported Gemini interaction mode." },
         { status: 400 }
       );
     }
 
-    if ((mode === "smart-log" || mode === "coach") && !prompt) {
+    if (
+      (mode === "smart-log" || mode === "coach" || mode === "food-search") &&
+      !prompt
+    ) {
       return NextResponse.json(
-        { error: "Please enter a prompt before sending." },
+        { error: "Please enter a query or prompt before sending." },
         { status: 400 }
       );
     }
 
-    const analysis = calculateSufficiencyAnalysis(entry, profile);
-    const telemetryContext = buildTelemetryContext({
-      slug,
-      date,
-      entry,
-      profile,
-      analysis,
-    });
+    const entry = body?.entry as DailyEntry | undefined;
+    const profile = body?.profile as UserProfileStore | undefined;
+
+    if (mode !== "food-search" && (!entry || !profile)) {
+      return NextResponse.json(
+        { error: "Missing entry or profile telemetry payload." },
+        { status: 400 }
+      );
+    }
+
+    const analysis =
+      entry && profile ? calculateSufficiencyAnalysis(entry, profile) : null;
+    const telemetryContext =
+      entry && profile && analysis
+        ? buildTelemetryContext({
+            slug,
+            date,
+            entry,
+            profile,
+            analysis,
+          })
+        : "";
 
     const buildFallbackResponse = () => {
-      if (mode === "optimize-day") {
+      if (mode === "food-search") {
+        return NextResponse.json({
+          ok: true,
+          mode,
+          source: "local-fallback",
+          model,
+          interactionId: `offline_fallback_${Date.now()}`,
+          food: buildFallbackFoodSearch(prompt),
+        });
+      }
+      if (mode === "optimize-day" && entry && profile && analysis) {
         return NextResponse.json({
           ok: true,
           mode,
@@ -323,7 +447,7 @@ export async function POST(req: NextRequest) {
           prescription: buildFallbackPrescription(entry, profile, analysis, model),
         });
       }
-      if (mode === "smart-log") {
+      if (mode === "smart-log" && profile) {
         return NextResponse.json({
           ok: true,
           mode,
@@ -339,7 +463,9 @@ export async function POST(req: NextRequest) {
         source: "local-fallback",
         model,
         interactionId: `offline_fallback_${Date.now()}`,
-        reply: `Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`,
+        reply: analysis
+          ? `Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`
+          : "Offline coach summary unavailable without telemetry payload.",
       });
     };
 
@@ -351,6 +477,110 @@ export async function POST(req: NextRequest) {
     const client = new GoogleGenAI({ apiKey });
 
     const runGeminiInteraction = async (activeModel: AllowedGeminiModel) => {
+      if (mode === "food-search") {
+        const interaction = await client.interactions.create({
+          model: activeModel,
+          system_instruction:
+            "You are a clinical nutritionist database using official ICMR-NIN Indian Food Composition Tables (IFCT) and USDA FoodData Central standards. Given any food or beverage query, return accurate nutritional values per 100g (or 100ml) including calories, protein, carbs, fats, dietary fiber, water content in liters (waterLitersPer100g, e.g., 0.085 for 85ml water per 100g), and 3 realistic standard portion sizes with exact gram weights.",
+          input: `Lookup standardized global (USDA) and Indian (ICMR-NIN) nutritional data for: "${prompt}"`,
+          response_format: {
+            type: "text",
+            mime_type: "application/json",
+            schema: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                category: {
+                  type: "string",
+                  enum: [
+                    "Indian Staples & Meals",
+                    "Proteins, Poultry & Fish",
+                    "Dairy, Eggs & Plant Protein",
+                    "Grains, Oats & Breads",
+                    "Fruits, Veggies & Salads",
+                    "Nuts, Seeds & Healthy Fats",
+                    "Hydration & Beverages",
+                  ],
+                },
+                source: {
+                  type: "string",
+                  enum: ["ICMR-NIN (India)", "USDA Global", "ICMR-NIN & USDA"],
+                },
+                caloriesPer100g: { type: "number" },
+                proteinPer100g: { type: "number" },
+                carbsPer100g: { type: "number" },
+                fatsPer100g: { type: "number" },
+                fiberPer100g: { type: "number" },
+                waterLitersPer100g: { type: "number" },
+                portions: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      label: { type: "string" },
+                      grams: { type: "number" },
+                    },
+                    required: ["label", "grams"],
+                  },
+                },
+              },
+              required: [
+                "name",
+                "category",
+                "source",
+                "caloriesPer100g",
+                "proteinPer100g",
+                "carbsPer100g",
+                "fatsPer100g",
+                "fiberPer100g",
+                "waterLitersPer100g",
+                "portions",
+              ],
+            },
+          },
+        });
+
+        const parsedFood = JSON.parse(interaction.output_text || "{}") as Omit<
+          FoodDatabaseItem,
+          "id" | "aliases"
+        >;
+        const food: FoodDatabaseItem = {
+          id: `food-ai-${Date.now()}`,
+          aliases: [prompt.toLowerCase()],
+          name: parsedFood.name || prompt,
+          category: parsedFood.category || "Indian Staples & Meals",
+          source: parsedFood.source || "ICMR-NIN & USDA",
+          caloriesPer100g: Math.max(0, Number(parsedFood.caloriesPer100g) || 0),
+          proteinPer100g: Math.max(0, Number(parsedFood.proteinPer100g) || 0),
+          carbsPer100g: Math.max(0, Number(parsedFood.carbsPer100g) || 0),
+          fatsPer100g: Math.max(0, Number(parsedFood.fatsPer100g) || 0),
+          fiberPer100g: Math.max(0, Number(parsedFood.fiberPer100g) || 0),
+          waterLitersPer100g: Math.min(
+            0.1,
+            Math.max(0, Number(parsedFood.waterLitersPer100g) || 0)
+          ),
+          portions:
+            Array.isArray(parsedFood.portions) && parsedFood.portions.length > 0
+              ? parsedFood.portions.map((p) => ({
+                  label: p.label,
+                  grams: Math.max(1, Number(p.grams) || 100),
+                }))
+              : [
+                  { label: "100g standard serving (100g)", grams: 100 },
+                  { label: "1 medium serving (150g)", grams: 150 },
+                ],
+        };
+
+        return NextResponse.json({
+          ok: true,
+          mode,
+          source: "gemini-interactions-api",
+          model: interaction.model || activeModel,
+          interactionId: interaction.id,
+          food,
+        });
+      }
+
       if (mode === "optimize-day") {
         const interaction = await client.interactions.create({
           model: activeModel,
@@ -448,7 +678,7 @@ export async function POST(req: NextRequest) {
       if (mode === "smart-log") {
         const interaction = await client.interactions.create({
           model: activeModel,
-          system_instruction: `You are a structured fitness, nutrition, and sleep log parser for PulseLoop (/u/${slug}). Convert the user's natural language into structured exercises (${profile.weightUnit}), meals (kcal/protein/carbs/fats), and numeric deltas for sleepHoursDelta, deepSleepHoursDelta, gymMinutesDelta, and cardioMinutesDelta (default deltas to 0 if not mentioned).`,
+          system_instruction: `You are a structured fitness, nutrition, and sleep log parser for PulseLoop (/u/${slug}). Convert the user's natural language into structured exercises (${profile?.weightUnit || "kg"}), meals (kcal/protein/carbs/fats), and numeric deltas for sleepHoursDelta, deepSleepHoursDelta, gymMinutesDelta, and cardioMinutesDelta (default deltas to 0 if not mentioned).`,
           input: `Current athlete context:\n${telemetryContext}\n\nNatural-language log input to parse:\n"${prompt}"`,
           response_format: {
             type: "text",

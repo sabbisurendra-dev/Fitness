@@ -31,6 +31,10 @@ import {
   Bot,
   RotateCcw,
   Wand2,
+  Search,
+  Scale,
+  Utensils,
+  ShieldCheck,
 } from "lucide-react";
 import {
   UserProfileStore,
@@ -41,10 +45,17 @@ import {
   CustomHealthMetric,
   AiCoachMessage,
   AiRecoveryPrescription,
+  approximateSleepBiometricsForIndianMale70kg,
   createDefaultUserProfile,
   createDefaultDailyEntry,
   calculateSufficiencyAnalysis,
 } from "@/lib/types";
+import {
+  FOOD_DATABASE,
+  FoodDatabaseItem,
+  searchFoodsCatalog,
+  calculateFoodPortionNutrition,
+} from "@/lib/nutritionDatabase";
 
 interface FitnessDashboardProps {
   initialSlug?: string;
@@ -96,6 +107,22 @@ export default function FitnessDashboard({
   const [coachError, setCoachError] = useState("");
   const [geminiStatusMessage, setGeminiStatusMessage] = useState("");
   const [showAiHub, setShowAiHub] = useState(true);
+
+  // Open Food Search & Portion Customizer state (Global USDA + Indian ICMR-NIN)
+  const [foodSearchQuery, setFoodSearchQuery] = useState("");
+  const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>("All");
+  const [aiFoodResults, setAiFoodResults] = useState<FoodDatabaseItem[]>([]);
+  const [selectedFoodItem, setSelectedFoodItem] = useState<FoodDatabaseItem>(
+    () => FOOD_DATABASE[0]
+  );
+  const [selectedPortionIndex, setSelectedPortionIndex] = useState<number>(0);
+  const [customWeightGrams, setCustomWeightGrams] = useState<number>(
+    FOOD_DATABASE[0].portions[0].grams
+  );
+  const [foodQuantity, setFoodQuantity] = useState<number>(1);
+  const [foodTime, setFoodTime] = useState<string>("13:00");
+  const [foodSearchLoading, setFoodSearchLoading] = useState(false);
+  const [foodSearchMessage, setFoodSearchMessage] = useState("");
 
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -255,20 +282,48 @@ export default function FitnessDashboard({
           updatedAt: new Date().toISOString(),
         };
 
-        // If useMealSum is enabled, recalculate daily macros from meals
+        // If useMealSum is enabled, recalculate daily calories, macros, fiber & hydration from meals
         if (updatedDay.nutrition.useMealSum) {
+          const hasMealFiber = updatedDay.nutrition.meals.some(
+            (m) => m.fiberGrams !== undefined
+          );
+          const hasMealWater = updatedDay.nutrition.meals.some(
+            (m) => m.waterLiters !== undefined
+          );
           const totals = updatedDay.nutrition.meals.reduce(
             (acc, m) => ({
               calories: acc.calories + (Number(m.calories) || 0),
               protein: acc.protein + (Number(m.protein) || 0),
               carbs: acc.carbs + (Number(m.carbs) || 0),
               fats: acc.fats + (Number(m.fats) || 0),
+              fiberGrams: acc.fiberGrams + (Number(m.fiberGrams) || 0),
+              waterLiters: acc.waterLiters + (Number(m.waterLiters) || 0),
             }),
-            { calories: 0, protein: 0, carbs: 0, fats: 0 }
+            {
+              calories: 0,
+              protein: 0,
+              carbs: 0,
+              fats: 0,
+              fiberGrams: 0,
+              waterLiters: 0,
+            }
           );
           updatedDay.nutrition = {
             ...updatedDay.nutrition,
-            ...totals,
+            calories: Math.round(totals.calories),
+            protein: Math.round(totals.protein),
+            carbs: Math.round(totals.carbs),
+            fats: Math.round(totals.fats),
+            ...(updatedDay.nutrition.meals.length === 0
+              ? { fiberGrams: 0, waterLiters: 0 }
+              : {
+                  ...(hasMealFiber
+                    ? { fiberGrams: Number(totals.fiberGrams.toFixed(1)) }
+                    : {}),
+                  ...(hasMealWater
+                    ? { waterLiters: Number(totals.waterLiters.toFixed(2)) }
+                    : {}),
+                }),
           };
         }
 
@@ -428,6 +483,10 @@ export default function FitnessDashboard({
       protein: 35,
       carbs: 45,
       fats: 12,
+      fiberGrams: 4,
+      waterLiters: 0.2,
+      portionLabel: "1 serving (250g)",
+      weightGrams: 250,
       note: "",
     };
     updateCurrentDay((d) => ({
@@ -435,6 +494,123 @@ export default function FitnessDashboard({
       nutrition: {
         ...d.nutrition,
         meals: [...d.nutrition.meals, newMeal],
+      },
+    }));
+  };
+
+  const handleSelectFoodItem = (food: FoodDatabaseItem) => {
+    setSelectedFoodItem(food);
+    setSelectedPortionIndex(0);
+    setCustomWeightGrams(food.portions[0]?.grams || 100);
+    setFoodQuantity(1);
+  };
+
+  const handleAddFoodFromSearch = () => {
+    const calc = calculateFoodPortionNutrition(
+      selectedFoodItem,
+      customWeightGrams,
+      foodQuantity
+    );
+    const activePortion =
+      selectedPortionIndex >= 0
+        ? selectedFoodItem.portions[selectedPortionIndex]
+        : null;
+    const portionSummary = activePortion
+      ? `${foodQuantity !== 1 ? `${foodQuantity} × ` : ""}${activePortion.label}`
+      : `${calc.totalGrams}g custom portion`;
+
+    const newMeal: MealEntry = {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: foodTime || "13:00",
+      name: selectedFoodItem.name,
+      calories: calc.calories,
+      protein: Math.round(calc.protein),
+      carbs: Math.round(calc.carbs),
+      fats: Math.round(calc.fats),
+      fiberGrams: calc.fiberGrams,
+      waterLiters: calc.waterLiters,
+      portionLabel: portionSummary,
+      weightGrams: calc.totalGrams,
+      note: `${selectedFoodItem.source} · ${portionSummary}`,
+    };
+
+    updateCurrentDay((d) => ({
+      ...d,
+      nutrition: {
+        ...d.nutrition,
+        useMealSum: true,
+        meals: [...d.nutrition.meals, newMeal],
+      },
+    }));
+    setFoodSearchMessage(
+      `Added ${newMeal.name} (${calc.totalGrams}g · ${calc.calories} kcal, ${Math.round(calc.protein)}g P, ${calc.fiberGrams}g fiber, ${calc.waterLiters}L water) and updated daily totals.`
+    );
+  };
+
+  const handleOpenAiFoodSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = foodSearchQuery.trim();
+    if (!q || foodSearchLoading) return;
+
+    setFoodSearchLoading(true);
+    setFoodSearchMessage("");
+    try {
+      const res = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "food-search",
+          model: geminiModel,
+          prompt: q,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok || !data?.food) {
+        throw new Error(data?.error || "Unable to fetch food nutrition.");
+      }
+      const fetched = data.food as FoodDatabaseItem;
+      setAiFoodResults((prev) => {
+        const filtered = prev.filter(
+          (item) => item.name.toLowerCase() !== fetched.name.toLowerCase()
+        );
+        return [fetched, ...filtered].slice(0, 8);
+      });
+      handleSelectFoodItem(fetched);
+      setFoodSearchMessage(
+        `Loaded standardized macros for "${fetched.name}" (${fetched.source}). Select portion/grams below and click Add Food.`
+      );
+    } catch (err) {
+      setFoodSearchMessage(
+        err instanceof Error ? err.message : "Failed to look up custom food."
+      );
+    } finally {
+      setFoodSearchLoading(false);
+    }
+  };
+
+  // Sleep 70 kg Indian male auto-approximation helper
+  const updateSleepWith70kgIndianBaseline = (
+    nextHours: number,
+    nextQuality: number
+  ) => {
+    const safeHours = Math.max(0, Math.min(16, Number(nextHours) || 0));
+    const safeQuality = Math.max(1, Math.min(10, Number(nextQuality) || 1));
+    const approx = approximateSleepBiometricsForIndianMale70kg(
+      safeHours,
+      safeQuality
+    );
+    updateCurrentDay((d) => ({
+      ...d,
+      sleep: {
+        ...d.sleep,
+        totalHours: safeHours,
+        sleepQuality: safeQuality,
+        deepSleepHours: approx.deepSleepHours,
+        remSleepHours: approx.remSleepHours,
+        lightSleepHours: approx.lightSleepHours,
+        awakeMinutes: approx.awakeMinutes,
+        restingHeartRate: approx.restingHeartRate,
+        hrvMs: approx.hrvMs,
       },
     }));
   };
@@ -866,6 +1042,38 @@ export default function FitnessDashboard({
 
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
 
+  const combinedCatalogMatches = (() => {
+    const baseMatches = searchFoodsCatalog(foodSearchQuery);
+    const merged = [...aiFoodResults, ...baseMatches];
+    const seen = new Set<string>();
+    return merged.filter((item) => {
+      const key = item.name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      if (
+        foodCategoryFilter !== "All" &&
+        item.category !== foodCategoryFilter
+      ) {
+        return false;
+      }
+      if (!foodSearchQuery.trim()) return true;
+      const hay = [item.name, item.category, ...item.aliases]
+        .join(" ")
+        .toLowerCase();
+      return foodSearchQuery
+        .trim()
+        .toLowerCase()
+        .split(/\s+/)
+        .every((tok) => hay.includes(tok));
+    });
+  })();
+
+  const foodPreview = calculateFoodPortionNutrition(
+    selectedFoodItem,
+    customWeightGrams,
+    foodQuantity
+  );
+
   return (
     <div className="min-h-screen pb-16 transition-colors">
       {/* Sticky Minimal Top Header */}
@@ -1070,10 +1278,10 @@ export default function FitnessDashboard({
               {(
                 [
                   { id: "all", label: "All Modules" },
-                  { id: "workout", label: "Workouts" },
-                  { id: "nutrition", label: "Nutrition" },
-                  { id: "sleep", label: "Sleep & Recovery" },
-                  { id: "research", label: "Market Benchmarks" },
+                  { id: "workout", label: "1. Workouts" },
+                  { id: "nutrition", label: "2. Nutrition" },
+                  { id: "sleep", label: "3. Sleep & Recovery" },
+                  { id: "research", label: "About Us" },
                 ] as { id: ActiveTab; label: string }[]
               ).map((tab) => (
                 <button
@@ -1483,8 +1691,7 @@ export default function FitnessDashboard({
                         {currentDay.aiCoach.prescription.recommendedExercise.sets} sets ×{" "}
                         {currentDay.aiCoach.prescription.recommendedExercise.reps} reps @{" "}
                         {currentDay.aiCoach.prescription.recommendedExercise.weight}{" "}
-                        {profile.weightUnit} (RPE{" "}
-                        {currentDay.aiCoach.prescription.recommendedExercise.rpe})
+                        {profile.weightUnit}
                       </div>
                     </div>
                   )}
@@ -1740,7 +1947,7 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            MODULE 1: WORKOUTS (Gym Duration, Exercises, Sets, Reps, Weight, Notes)
+            MODULE 1: WORKOUTS (Simple Exercise, Weight & Reps Tracker)
            ========================================================= */}
         {(activeTab === "all" || activeTab === "workout") && (
           <section
@@ -1757,14 +1964,14 @@ export default function FitnessDashboard({
                     id="heading-workouts"
                     className="text-base font-bold sm:text-lg"
                   >
-                    1. Workouts & Gym Session
+                    1. Workouts
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Inline set/rep/weight tracker · Volume:{" "}
+                    Simple Exercise, Weight &amp; Reps logger ·{" "}
                     <strong className="text-[var(--text-primary)]">
-                      {analysis.totalVolume.toLocaleString()} {profile.weightUnit}
+                      {analysis.totalSets} sets
                     </strong>{" "}
-                    across {analysis.totalSets} sets ({analysis.totalReps} total reps)
+                    ({analysis.totalReps} completed reps)
                   </p>
                 </div>
               </div>
@@ -1794,8 +2001,8 @@ export default function FitnessDashboard({
               </div>
             </div>
 
-            {/* Session Summary Inputs (Gym Time, Workout Name, RPE, Cardio) */}
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+            {/* Session Summary Inputs (Workout Split, Gym Time, Cardio) */}
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
               <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
                 <label
                   htmlFor="workout-title"
@@ -1843,37 +2050,6 @@ export default function FitnessDashboard({
                     className="w-20 bg-transparent text-lg font-bold text-sky-400 focus:outline-none"
                   />
                   <span className="text-xs text-[var(--text-muted)]">mins</span>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="session-rpe"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Session Intensity (RPE 1–10)
-                </label>
-                <div className="mt-1 flex items-baseline gap-1">
-                  <input
-                    id="session-rpe"
-                    type="text"
-                    inputMode="decimal"
-                    value={currentDay.workout.sessionRpe}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        workout: {
-                          ...d.workout,
-                          sessionRpe: Math.min(
-                            10,
-                            Number(e.target.value.replace(/[^0-9.]/g, "")) || 0
-                          ),
-                        },
-                      }))
-                    }
-                    className="w-16 bg-transparent text-lg font-bold text-amber-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">/ 10</span>
                 </div>
               </div>
 
@@ -1991,19 +2167,22 @@ export default function FitnessDashboard({
                     </div>
                   </div>
 
-                  {/* Sets Inline Table */}
-                  <div className="overflow-x-auto">
+                  {/* Sets Inline Table (Clean Exercise, Weight, Reps, Done) */}
+                  <div
+                    tabIndex={0}
+                    role="region"
+                    aria-label={`${exercise.name || `Exercise ${exIdx + 1}`} sets`}
+                    className="overflow-x-auto"
+                  >
                     <table className="w-full text-left text-xs">
                       <thead>
                         <tr className="border-b border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)]">
-                          <th className="py-1.5 pr-2 w-12">Set</th>
-                          <th className="py-1.5 px-2">
+                          <th scope="col" className="py-1.5 pr-2 w-12">Set</th>
+                          <th scope="col" className="py-1.5 px-2">
                             Weight ({profile.weightUnit})
                           </th>
-                          <th className="py-1.5 px-2">Reps</th>
-                          <th className="py-1.5 px-2">RPE</th>
-                          <th className="py-1.5 px-2">Volume</th>
-                          <th className="py-1.5 pl-2 text-right">Done</th>
+                          <th scope="col" className="py-1.5 px-2">Reps</th>
+                          <th scope="col" className="py-1.5 pl-2 text-right">Done</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[var(--border-subtle)]/50">
@@ -2031,7 +2210,7 @@ export default function FitnessDashboard({
                                       ) || 0,
                                   })
                                 }
-                                className="w-20 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 font-semibold focus:border-sky-400 focus:outline-none"
+                                className="w-24 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 font-semibold focus:border-sky-400 focus:outline-none"
                               />
                             </td>
                             <td className="py-1.5 px-2">
@@ -2048,31 +2227,8 @@ export default function FitnessDashboard({
                                       ) || 0,
                                   })
                                 }
-                                className="w-16 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 font-semibold focus:border-sky-400 focus:outline-none"
+                                className="w-20 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 font-semibold focus:border-sky-400 focus:outline-none"
                               />
-                            </td>
-                            <td className="py-1.5 px-2">
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                aria-label={`Set ${sIdx + 1} RPE`}
-                                value={s.rpe ?? 8}
-                                onChange={(e) =>
-                                  updateExerciseSet(exercise.id, s.id, {
-                                    rpe:
-                                      Number(
-                                        e.target.value.replace(/[^0-9.]/g, "")
-                                      ) || 0,
-                                  })
-                                }
-                                className="w-14 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[var(--text-muted)] focus:border-sky-400 focus:outline-none"
-                              />
-                            </td>
-                            <td className="py-1.5 px-2 font-medium text-[var(--text-muted)]">
-                              {(
-                                (Number(s.weight) || 0) * (Number(s.reps) || 0)
-                              ).toLocaleString()}{" "}
-                              {profile.weightUnit}
                             </td>
                             <td className="py-1.5 pl-2 text-right">
                               <div className="inline-flex items-center gap-1.5">
@@ -2149,7 +2305,7 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            MODULE 2: NUTRITION & HEALTH METRICS (Calories, Macros, Water, Custom Metrics, Notes)
+            MODULE 2: NUTRITION & HEALTH METRICS (Open Food Search, Portion Selector, 6-Macro Totals)
            ========================================================= */}
         {(activeTab === "all" || activeTab === "nutrition") && (
           <section
@@ -2166,10 +2322,10 @@ export default function FitnessDashboard({
                     id="heading-nutrition"
                     className="text-base font-bold sm:text-lg"
                   >
-                    2. Nutrition, Macros & Health Metrics
+                    2. Nutrition
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Tap any calorie/macro value or target to type directly, or log meals below
+                    Open Global (USDA) &amp; Indian (ICMR-NIN) food search with portion weights — auto-sums Calories, Macros, Hydration &amp; Fiber
                   </p>
                 </div>
               </div>
@@ -2326,11 +2482,318 @@ export default function FitnessDashboard({
               })}
             </div>
 
+            {/* Open Food Search & Portion Customizer (MyFitnessPal / ICMR-NIN / USDA Standard) */}
+            <div className="rounded-xl border border-amber-500/30 bg-[var(--bg-elevated)] p-3.5 sm:p-4 space-y-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Utensils className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                  <h3
+                    id="heading-food-search"
+                    className="text-xs sm:text-sm font-bold"
+                  >
+                    Open Food Search &amp; Portion Calculator (ICMR-NIN India + USDA Global)
+                  </h3>
+                </div>
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400">
+                  {FOOD_DATABASE.length + aiFoodResults.length}+ Standardized Foods + Open Lookup
+                </span>
+              </div>
+
+              <search>
+                <form
+                  aria-labelledby="heading-food-search"
+                  onSubmit={handleOpenAiFoodSearch}
+                  className="flex flex-wrap items-end gap-2"
+                >
+                  <div className="flex-1 min-w-[220px] space-y-1">
+                    <label
+                      htmlFor="food-search-input"
+                      className="block text-[11px] font-medium text-[var(--text-muted)]"
+                    >
+                      Search any Global or Indian food (e.g. Grilled Chicken Breast, Salmon Fillet, Chapati, Dal Tadka, Paneer Tikka, Idli)
+                    </label>
+                    <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 focus-within:border-amber-400">
+                      <Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
+                      <input
+                        id="food-search-input"
+                        name="foodQuery"
+                        type="search"
+                        value={foodSearchQuery}
+                        onChange={(e) => setFoodSearchQuery(e.target.value)}
+                        placeholder="Type any food name to search or fetch macros..."
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        className="w-full bg-transparent text-xs sm:text-sm focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={foodSearchLoading || !foodSearchQuery.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50 transition"
+                  >
+                    {foodSearchLoading ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        <span>Looking up...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Fetch Any Food</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              </search>
+
+              {/* Category Chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  "All",
+                  "Indian Staples & Meals",
+                  "Proteins, Poultry & Fish",
+                  "Dairy, Eggs & Plant Protein",
+                  "Hydration & Beverages",
+                ].map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setFoodCategoryFilter(cat)}
+                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
+                      foodCategoryFilter === cat
+                        ? "bg-amber-500 text-slate-950 font-semibold"
+                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              {/* Search Results + Portion & Gram Customizer Split */}
+              <div className="grid gap-3 lg:grid-cols-12">
+                {/* Matching Foods List */}
+                <div className="lg:col-span-6 space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                  {combinedCatalogMatches.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-muted)]">
+                      No exact local catalog match for &ldquo;{foodSearchQuery}&rdquo;. Click{" "}
+                      <strong className="text-amber-400">Fetch Any Food</strong> above to pull standardized ICMR-NIN / USDA macros automatically.
+                    </div>
+                  ) : (
+                    combinedCatalogMatches.slice(0, 10).map((item) => {
+                      const isSelected = selectedFoodItem.id === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => handleSelectFoodItem(item)}
+                          className={`w-full text-left rounded-lg border p-2.5 transition ${
+                            isSelected
+                              ? "border-amber-400 bg-amber-500/10"
+                              : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-amber-500/40"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-[var(--text-primary)]">
+                              {item.name}
+                            </span>
+                            <span className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                              {item.source}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
+                            <span>Per 100g:</span>
+                            <strong className="text-amber-400">{item.caloriesPer100g} kcal</strong>
+                            <span className="text-emerald-400">{item.proteinPer100g}g P</span>
+                            <span className="text-sky-400">{item.carbsPer100g}g C</span>
+                            <span className="text-purple-400">{item.fatsPer100g}g F</span>
+                            <span className="text-teal-400">{item.fiberPer100g}g Fib</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Selected Food Portion & Weight Customizer */}
+                <div className="lg:col-span-6 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-3">
+                  <div className="flex items-start justify-between gap-2 border-b border-[var(--border-subtle)] pb-2">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-400">
+                        Customize Portion &amp; Weight
+                      </div>
+                      <div className="text-xs sm:text-sm font-bold">
+                        {selectedFoodItem.name}
+                      </div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {selectedFoodItem.category} · {selectedFoodItem.source}
+                      </div>
+                    </div>
+                    <div className="inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[11px] font-semibold text-amber-400">
+                      <Scale className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{foodPreview.totalGrams} g/ml</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="sm:col-span-2">
+                      <label
+                        htmlFor="food-portion-select"
+                        className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                      >
+                        Portion Size (with Weight Indicator)
+                      </label>
+                      <select
+                        id="food-portion-select"
+                        value={selectedPortionIndex}
+                        onChange={(e) => {
+                          const idx = Number(e.target.value);
+                          setSelectedPortionIndex(idx);
+                          if (idx >= 0 && selectedFoodItem.portions[idx]) {
+                            setCustomWeightGrams(
+                              selectedFoodItem.portions[idx].grams
+                            );
+                          }
+                        }}
+                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium focus:border-amber-400 focus:outline-none"
+                      >
+                        {selectedFoodItem.portions.map((p, idx) => (
+                          <option key={p.label} value={idx}>
+                            {p.label}
+                          </option>
+                        ))}
+                        <option value={-1}>
+                          Custom Weight (grams / ml)
+                        </option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="food-grams-input"
+                        className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                      >
+                        Base Weight (grams / ml)
+                      </label>
+                      <input
+                        id="food-grams-input"
+                        type="text"
+                        inputMode="numeric"
+                        value={customWeightGrams}
+                        onChange={(e) => {
+                          setSelectedPortionIndex(-1);
+                          setCustomWeightGrams(
+                            Number(e.target.value.replace(/[^0-9.]/g, "")) || 0
+                          );
+                        }}
+                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label
+                          htmlFor="food-quantity-input"
+                          className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                        >
+                          Qty / Servings
+                        </label>
+                        <input
+                          id="food-quantity-input"
+                          type="text"
+                          inputMode="decimal"
+                          value={foodQuantity}
+                          onChange={(e) =>
+                            setFoodQuantity(
+                              Math.max(
+                                0.25,
+                                Number(
+                                  e.target.value.replace(/[^0-9.]/g, "")
+                                ) || 1
+                              )
+                            )
+                          }
+                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="food-time-input"
+                          className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                        >
+                          Time
+                        </label>
+                        <input
+                          id="food-time-input"
+                          type="time"
+                          value={foodTime}
+                          onChange={(e) => setFoodTime(e.target.value)}
+                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-xs font-medium focus:border-amber-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Live Portion Nutrition Breakdown */}
+                  <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-center text-[11px]">
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Calories</div>
+                      <div className="font-bold text-amber-400">{foodPreview.calories}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Protein</div>
+                      <div className="font-bold text-emerald-400">{foodPreview.protein}g</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Carbs</div>
+                      <div className="font-bold text-sky-400">{foodPreview.carbs}g</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Fats</div>
+                      <div className="font-bold text-purple-400">{foodPreview.fats}g</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Fiber</div>
+                      <div className="font-bold text-teal-400">{foodPreview.fiberGrams}g</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-[var(--text-muted)]">Water</div>
+                      <div className="font-bold text-cyan-400">{foodPreview.waterLiters}L</div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleAddFoodFromSearch}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      Add {selectedFoodItem.name} ({foodPreview.totalGrams}g) to Daily Totals
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {foodSearchMessage && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400"
+                >
+                  {foodSearchMessage}
+                </div>
+              )}
+            </div>
+
             {/* Meal Log Breakdown */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                  Meals & Timed Nutrition Log
+                  Meals &amp; Timed Nutrition Log
                 </h3>
                 <button
                   type="button"
@@ -2338,7 +2801,7 @@ export default function FitnessDashboard({
                   className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-400 hover:bg-amber-500/20"
                 >
                   <Plus className="h-3 w-3" aria-hidden="true" />
-                  <span>Add Meal</span>
+                  <span>Add Custom Meal</span>
                 </button>
               </div>
 
@@ -2358,16 +2821,23 @@ export default function FitnessDashboard({
                         }
                         className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs font-medium"
                       />
-                      <input
-                        type="text"
-                        aria-label="Meal Description"
-                        value={meal.name}
-                        onChange={(e) =>
-                          updateMeal(meal.id, { name: e.target.value })
-                        }
-                        placeholder="Meal / food items..."
-                        className="flex-1 min-w-[180px] bg-transparent text-xs sm:text-sm font-semibold focus:outline-none"
-                      />
+                      <div className="flex-1 min-w-[180px] flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          aria-label="Meal Description"
+                          value={meal.name}
+                          onChange={(e) =>
+                            updateMeal(meal.id, { name: e.target.value })
+                          }
+                          placeholder="Meal / food items..."
+                          className="flex-1 min-w-[140px] bg-transparent text-xs sm:text-sm font-semibold focus:outline-none"
+                        />
+                        {meal.weightGrams ? (
+                          <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">
+                            {meal.weightGrams}g
+                          </span>
+                        ) : null}
+                      </div>
 
                       <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
@@ -2438,6 +2908,40 @@ export default function FitnessDashboard({
                             className="w-10 bg-transparent font-bold text-right focus:outline-none"
                           />
                         </label>
+                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
+                          <span className="text-[10px] text-teal-400">Fib(g)</span>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={meal.fiberGrams ?? 0}
+                            onChange={(e) =>
+                              updateMeal(meal.id, {
+                                fiberGrams:
+                                  Number(
+                                    e.target.value.replace(/[^0-9.]/g, "")
+                                  ) || 0,
+                              })
+                            }
+                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                          />
+                        </label>
+                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
+                          <span className="text-[10px] text-cyan-400">H2O(L)</span>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={meal.waterLiters ?? 0}
+                            onChange={(e) =>
+                              updateMeal(meal.id, {
+                                waterLiters:
+                                  Number(
+                                    e.target.value.replace(/[^0-9.]/g, "")
+                                  ) || 0,
+                              })
+                            }
+                            className="w-10 bg-transparent font-bold text-right focus:outline-none"
+                          />
+                        </label>
                         <button
                           type="button"
                           onClick={() => removeMeal(meal.id)}
@@ -2452,7 +2956,7 @@ export default function FitnessDashboard({
                     <input
                       type="text"
                       aria-label={`Note for ${meal.name}`}
-                      placeholder="Meal note (digestion, pre/post workout context, restaurant estimate)..."
+                      placeholder="Meal note (digestion, pre/post workout context, portion details)..."
                       value={meal.note}
                       onChange={(e) =>
                         updateMeal(meal.id, { note: e.target.value })
@@ -2583,12 +3087,10 @@ export default function FitnessDashboard({
                     id="heading-sleep"
                     className="text-base font-bold sm:text-lg"
                   >
-                    3. Sleep Architecture & Workout/Nutrition Sufficiency
+                    3. Sleep &amp; Recovery
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Evaluates total sleep & deep sleep against today&apos;s{" "}
-                    {currentDay.workout.gymDurationMinutes}m gym load and{" "}
-                    {currentDay.nutrition.calories} kcal nutrition
+                    Enter your total sleep hours &amp; 1–10 sleep quality rating — Resting HR, HRV, Deep &amp; REM stages auto-approximate for a 70 kg Indian man
                   </p>
                 </div>
               </div>
@@ -2617,45 +3119,144 @@ export default function FitnessDashboard({
               </div>
             </div>
 
-            {/* Sleep Metrics Inline Grid */}
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-8">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 col-span-1 sm:col-span-2">
-                <label
-                  htmlFor="sleep-total"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Total Sleep Duration (hrs)
-                </label>
-                <div className="mt-1 flex items-baseline gap-1.5">
-                  <input
-                    id="sleep-total"
-                    type="text"
-                    inputMode="decimal"
-                    value={currentDay.sleep.totalHours}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        sleep: {
-                          ...d.sleep,
-                          totalHours:
-                            Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                        },
-                      }))
-                    }
-                    className="w-20 bg-transparent text-2xl font-extrabold text-indigo-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">
-                    hrs (Need: {analysis.requiredSleepHours}h)
-                  </span>
+            {/* Direct Sleep Hours + Quality Logger (Calibrated for 70 kg Indian Adult Male) */}
+            <div className="rounded-xl border border-indigo-500/30 bg-[var(--bg-elevated)] p-3.5 sm:p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-bold text-indigo-400">
+                  Direct Sleep Entry · 70 kg Indian Male Baseline Approximation
+                </div>
+                <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                  Start/Stop sleep timer coming in V2
+                </span>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="sleep-total"
+                      className="text-xs font-semibold text-[var(--text-primary)]"
+                    >
+                      Total Sleep Duration (hrs)
+                    </label>
+                    <span className="text-[11px] text-[var(--text-muted)]">
+                      Strain Need: {analysis.requiredSleepHours}h
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <input
+                      id="sleep-total"
+                      type="text"
+                      inputMode="decimal"
+                      value={currentDay.sleep.totalHours}
+                      onChange={(e) =>
+                        updateSleepWith70kgIndianBaseline(
+                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
+                          currentDay.sleep.sleepQuality
+                        )
+                      }
+                      className="w-24 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold text-indigo-400 focus:border-indigo-400 focus:outline-none"
+                    />
+                    <span className="text-xs text-[var(--text-muted)]">
+                      hours slept
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9].map((hrs) => (
+                      <button
+                        key={hrs}
+                        type="button"
+                        aria-pressed={currentDay.sleep.totalHours === hrs}
+                        onClick={() =>
+                          updateSleepWith70kgIndianBaseline(
+                            hrs,
+                            currentDay.sleep.sleepQuality
+                          )
+                        }
+                        className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                          currentDay.sleep.totalHours === hrs
+                            ? "bg-indigo-500 text-slate-950"
+                            : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-indigo-400/50"
+                        }`}
+                      >
+                        {hrs}h
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="sleep-quality"
+                      className="text-xs font-semibold text-[var(--text-primary)]"
+                    >
+                      Rate Sleep Quality (1 to 10)
+                    </label>
+                    <span className="text-[11px] text-amber-400 font-semibold">
+                      {currentDay.sleep.sleepQuality} / 10
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <input
+                      id="sleep-quality"
+                      type="text"
+                      inputMode="numeric"
+                      value={currentDay.sleep.sleepQuality}
+                      onChange={(e) => {
+                        const raw =
+                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 1;
+                        updateSleepWith70kgIndianBaseline(
+                          currentDay.sleep.totalHours,
+                          Math.max(1, Math.min(10, Math.round(raw)))
+                        );
+                      }}
+                      className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold text-amber-400 focus:border-amber-400 focus:outline-none"
+                    />
+                    <span className="text-xs text-[var(--text-muted)]">
+                      out of 10
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        aria-label={`Rate sleep quality ${q} out of 10`}
+                        aria-pressed={currentDay.sleep.sleepQuality === q}
+                        onClick={() =>
+                          updateSleepWith70kgIndianBaseline(
+                            currentDay.sleep.totalHours,
+                            q
+                          )
+                        }
+                        className={`min-w-[28px] rounded-md px-2 py-1 text-[11px] font-bold transition ${
+                          currentDay.sleep.sleepQuality === q
+                            ? "bg-amber-500 text-slate-950"
+                            : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-amber-400/50"
+                        }`}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 col-span-1 sm:col-span-2">
+              <p className="text-[11px] text-[var(--text-muted)]">
+                <strong>Standard Indian 70 kg Man Approximation Active:</strong>{" "}
+                Changing sleep duration or 1–10 quality automatically updates estimated Deep Sleep (SWS), REM, Resting HR (~62 bpm baseline), and HRV (~60 ms baseline). Override any individual wearable value below if needed.
+              </p>
+            </div>
+
+            {/* Approximated / Wearable Override Biometrics Inline Grid */}
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
                 <label
                   htmlFor="sleep-deep"
                   className="block text-[11px] font-medium text-[var(--text-muted)]"
                 >
-                  Deep Sleep / SWS (hrs)
+                  Deep Sleep / SWS (hrs · est.)
                 </label>
                 <div className="mt-1 flex items-baseline gap-1.5">
                   <input
@@ -2673,7 +3274,7 @@ export default function FitnessDashboard({
                         },
                       }))
                     }
-                    className="w-16 bg-transparent text-2xl font-extrabold text-emerald-400 focus:outline-none"
+                    className="w-16 bg-transparent text-xl font-extrabold text-emerald-400 focus:outline-none"
                   />
                   <span className="text-xs text-[var(--text-muted)]">
                     hrs ({analysis.deepSleepPercentage}% · min {analysis.requiredDeepSleepHours}h)
@@ -2686,7 +3287,7 @@ export default function FitnessDashboard({
                   htmlFor="sleep-rem"
                   className="block text-[11px] font-medium text-[var(--text-muted)]"
                 >
-                  REM Sleep (hrs)
+                  REM Sleep (hrs · est.)
                 </label>
                 <input
                   id="sleep-rem"
@@ -2703,35 +3304,7 @@ export default function FitnessDashboard({
                       },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-lg font-bold text-sky-400 focus:outline-none"
-                />
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="sleep-quality"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Sleep Quality (1–10)
-                </label>
-                <input
-                  id="sleep-quality"
-                  type="text"
-                  inputMode="numeric"
-                  value={currentDay.sleep.sleepQuality}
-                  onChange={(e) =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      sleep: {
-                        ...d.sleep,
-                        sleepQuality: Math.min(
-                          10,
-                          Number(e.target.value.replace(/[^0-9.]/g, "")) || 0
-                        ),
-                      },
-                    }))
-                  }
-                  className="mt-1 w-full bg-transparent text-lg font-bold text-amber-400 focus:outline-none"
+                  className="mt-1 w-full bg-transparent text-xl font-bold text-sky-400 focus:outline-none"
                 />
               </div>
 
@@ -2740,7 +3313,7 @@ export default function FitnessDashboard({
                   htmlFor="sleep-rhr"
                   className="block text-[11px] font-medium text-[var(--text-muted)]"
                 >
-                  Resting HR (bpm)
+                  Resting HR (bpm · 70kg est.)
                 </label>
                 <input
                   id="sleep-rhr"
@@ -2757,7 +3330,7 @@ export default function FitnessDashboard({
                       },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-lg font-bold text-rose-400 focus:outline-none"
+                  className="mt-1 w-full bg-transparent text-xl font-bold text-rose-400 focus:outline-none"
                 />
               </div>
 
@@ -2766,7 +3339,7 @@ export default function FitnessDashboard({
                   htmlFor="sleep-hrv"
                   className="block text-[11px] font-medium text-[var(--text-muted)]"
                 >
-                  HRV (ms)
+                  HRV (ms · 70kg est.)
                 </label>
                 <input
                   id="sleep-hrv"
@@ -2783,7 +3356,7 @@ export default function FitnessDashboard({
                       },
                     }))
                   }
-                  className="mt-1 w-full bg-transparent text-lg font-bold text-teal-400 focus:outline-none"
+                  className="mt-1 w-full bg-transparent text-xl font-bold text-teal-400 focus:outline-none"
                 />
               </div>
             </div>
@@ -2794,36 +3367,9 @@ export default function FitnessDashboard({
                 <span className="font-semibold">
                   Cross-Module Sufficiency Diagnostic (Sleep × Workout × Nutrition)
                 </span>
-                <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)]">
-                  <label className="flex items-center gap-1">
-                    Bedtime:
-                    <input
-                      type="time"
-                      value={currentDay.sleep.bedtime}
-                      onChange={(e) =>
-                        updateCurrentDay((d) => ({
-                          ...d,
-                          sleep: { ...d.sleep, bedtime: e.target.value },
-                        }))
-                      }
-                      className="rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-xs"
-                    />
-                  </label>
-                  <label className="flex items-center gap-1">
-                    Wake:
-                    <input
-                      type="time"
-                      value={currentDay.sleep.wakeTime}
-                      onChange={(e) =>
-                        updateCurrentDay((d) => ({
-                          ...d,
-                          sleep: { ...d.sleep, wakeTime: e.target.value },
-                        }))
-                      }
-                      className="rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-xs"
-                    />
-                  </label>
-                </div>
+                <span className="text-[11px] text-[var(--text-muted)]">
+                  Start &amp; Stop Sleep Timings scheduled for V2
+                </span>
               </div>
 
               <div className="grid gap-2.5 sm:grid-cols-2 text-xs">
@@ -2841,12 +3387,12 @@ export default function FitnessDashboard({
 
                 <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
                   <div className="font-semibold text-emerald-400">
-                    Is Nutrition Sufficient for Sleep & Muscle Repair?
+                    Is Nutrition Sufficient for Sleep &amp; Muscle Repair?
                   </div>
                   <p className="mt-1 text-[var(--text-muted)] leading-relaxed">
                     {analysis.isNutritionSufficientForWorkout
                       ? `Yes — ${currentDay.nutrition.protein}g protein and ${currentDay.nutrition.calories} kcal provide sufficient amino acid & glycogen availability so overnight growth hormone during deep sleep can repair muscle tissue.`
-                      : `Deficit Detected — With ${analysis.totalVolume.toLocaleString()} ${profile.weightUnit} lifted today, your current intake (${currentDay.nutrition.calories} kcal, ${currentDay.nutrition.protein}g protein) risks blunting overnight HRV and deep-sleep muscle synthesis.`}
+                      : `Deficit Detected — With ${analysis.totalSets} sets (${analysis.totalReps} reps) logged today, your current intake (${currentDay.nutrition.calories} kcal, ${currentDay.nutrition.protein}g protein) risks blunting overnight HRV and deep-sleep muscle synthesis.`}
                   </p>
                 </div>
               </div>
@@ -2877,56 +3423,105 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            MODULE 4: MARKET RESEARCH, WEARABLES & CLINICAL BENCHMARKS
+            ABOUT US: PITCH, CORE USP, VALUE ADDITION & CLINICAL RESEARCH
            ========================================================= */}
         {(activeTab === "all" || activeTab === "research") && (
           <section
             aria-labelledby="heading-research"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
+            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-5"
           >
             <div className="flex items-center gap-2.5 border-b border-[var(--border-subtle)] pb-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-                <BookOpen className="h-5 w-5" aria-hidden="true" />
+                <ShieldCheck className="h-5 w-5" aria-hidden="true" />
               </div>
               <div>
                 <h2
                   id="heading-research"
                   className="text-base font-bold sm:text-lg"
                 >
-                  Industry Market Research & Clinical Best Practices Applied
+                  About Us — Our Pitch, Core USP &amp; Why PulseLoop Exists
                 </h2>
                 <p className="text-xs text-[var(--text-muted)]">
-                  How WHOOP, Apple, Garmin, Samsung, Fitbit/Google, Oura & Pro Clinics shaped this dashboard
+                  Hardware-free closed-loop fitness sufficiency built for Indian &amp; global lifters
                 </p>
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                <div className="font-bold text-emerald-400">
-                  WHOOP & Oura Ring (Closed-Loop Readiness)
+            {/* Product Pitch & Core USP Cards */}
+            <div className="grid gap-3 md:grid-cols-3 text-xs">
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 space-y-1.5">
+                <div className="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">
+                  The Pitch
+                </div>
+                <div className="text-sm font-bold text-[var(--text-primary)]">
+                  One Connected Recovery Loop Instead of 3 Siloed Apps
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  <strong>Best Practice Adopted:</strong> Sleep isn&apos;t evaluated in a vacuum. Higher daytime gym strain (`0–21`) dynamically raises tonight&apos;s required sleep hours and deep sleep (SWS) threshold.
+                  Gym trackers ignore protein and sleep. Calorie counters ignore training load. PulseLoop connects your Workouts, Nutrition, and Sleep on a single live screen so you know in seconds whether today&apos;s fueling and rest actually support tomorrow&apos;s lift.
                 </p>
               </div>
 
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                <div className="font-bold text-sky-400">
-                  Apple Watch Vitals, Garmin & Samsung Energy
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-1.5">
+                <div className="font-bold text-amber-400 uppercase tracking-wider text-[11px]">
+                  Our Core USP
+                </div>
+                <div className="text-sm font-bold text-[var(--text-primary)]">
+                  Global + Indian Nutrition &amp; 70 kg Physiological Calibration
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  <strong>Best Practice Adopted:</strong> Glanceable multi-ring status cards (`Readiness %`, `Strain`, `Sleep vs Need`, `Protein/Fuel`) with instant color-coded anomaly alerts (`Optimal`, `Borderline`, `Deficit`).
+                  Zero ₹25,000+ ring or band lock-in. Search both global USDA foods and Indian staples (Chapati, Dal, Paneer, Idli, Chicken) with real portion gram weights, log clean Exercise × Weight × Reps, and get instant 70 kg Indian adult male RHR, HRV &amp; sleep-stage approximations from simple sleep hours and a 1–10 rating.
                 </p>
               </div>
 
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                <div className="font-bold text-amber-400">
-                  Fitbit / Google Health & Clinical Coaching Portals
+              <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3.5 space-y-1.5">
+                <div className="font-bold text-sky-400 uppercase tracking-wider text-[11px]">
+                  Core Value Addition
+                </div>
+                <div className="text-sm font-bold text-[var(--text-primary)]">
+                  Zero-Friction Custom URLs + Stateful Gemini 4 Coaching
                 </div>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  <strong>Best Practice Adopted:</strong> Plain-English narrative insights + ubiquitous inline free-text notes at every layer (TrueCoach / Cronometer Pro standard) with zero-modal friction.
+                  No sign-up walls or cluttered charts: open any personal or client workspace at <code className="text-sky-400">/u/your-name</code> with instant offline-first auto-save, automatic 6-pillar nutrition totals (Calories, Protein, Carbs, Fats, Hydration, Fiber), and stateful Gemini 4 recovery guidance.
                 </p>
+              </div>
+            </div>
+
+            {/* Industry Market Research & Clinical Best Practices Applied (Retained & Aligned with USP) */}
+            <div className="space-y-3 pt-1">
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                <h3 className="text-sm font-bold">
+                  Industry Market Research &amp; Clinical Best Practices Applied
+                </h3>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
+                  <div className="font-bold text-emerald-400">
+                    WHOOP &amp; Oura Ring — Strain-to-Sleep Sufficiency
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    <strong>Best Practice Applied to Our USP:</strong> Sleep isn&apos;t judged in isolation. Even without a wearable, entering your total sleep hours and 1–10 quality triggers our 70 kg Indian male physiological model (Resting HR, HRV, Deep &amp; REM estimates) and checks it against your daytime gym strain.
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
+                  <div className="font-bold text-amber-400">
+                    MyFitnessPal, Livestrong &amp; ICMR-NIN / USDA Standards
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    <strong>Best Practice Applied to Our USP:</strong> Open food discovery shouldn&apos;t miss home-cooked Indian meals or Western staples. Searching any food returns standardized ICMR-NIN &amp; USDA macros with gram-weighted portions that automatically roll up into Calories, Protein, Carbs, Fats, Hydration, and Fiber.
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
+                  <div className="font-bold text-sky-400">
+                    Hevy &amp; Clinical Coaching — Zero-Bloat Inline Execution
+                  </div>
+                  <p className="text-[var(--text-muted)] leading-relaxed">
+                    <strong>Best Practice Applied to Our USP:</strong> Lifters want fast Exercise, Weight, and Reps tracking—not distracting RPE/volume math on every row. Paired with instant <code className="text-sky-400">Optimal</code> / <code className="text-amber-400">Borderline</code> / <code className="text-rose-400">Deficit</code> status banners and ubiquitous inline notes, tracking takes under 15 seconds.
+                  </p>
+                </div>
               </div>
             </div>
           </section>

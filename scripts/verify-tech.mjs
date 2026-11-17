@@ -7,7 +7,9 @@ const root = "/Users/sabbisurendra/Downloads/Fitness";
 // 1. Verify TECH-SEC-01: No hardcoded tokens or secrets in src/
 const srcFiles = [
   "src/lib/types.ts",
+  "src/lib/nutritionDatabase.ts",
   "src/app/api/state/route.ts",
+  "src/app/api/gemini/route.ts",
   "src/components/FitnessDashboard.tsx",
   "src/app/layout.tsx",
   "src/app/page.tsx",
@@ -220,5 +222,67 @@ assert.equal(extremeRes.requiredDeepSleepHours, 1.5, "High strain requires 1.5h 
 assert.equal(extremeRes.totalSets, 30);
 assert.equal(extremeRes.totalVolume, 30000);
 assert(extremeRes.readinessScore >= 12 && extremeRes.readinessScore <= 99);
+
+// 5. Verify 70 kg Indian Male Sleep Biometric Approximation & V1 Feature Checks
+function approximateSleepBiometricsForIndianMale70kg(totalHours, sleepQuality) {
+  const hours = Math.max(0, Math.min(16, Number(totalHours) || 0));
+  const quality = Math.max(1, Math.min(10, Number(sleepQuality) || 7));
+  const deepRatio = 0.15 + (quality / 10) * 0.065;
+  const remRatio = 0.18 + (quality / 10) * 0.05;
+  const deepSleepHours = Number((hours * deepRatio).toFixed(1));
+  const remSleepHours = Number((hours * remRatio).toFixed(1));
+  const lightSleepHours = Number(
+    Math.max(0, hours - deepSleepHours - remSleepHours).toFixed(1)
+  );
+  const awakeMinutes =
+    hours === 0 ? 0 : Math.max(5, Math.round(35 - quality * 2.2));
+  const sleepDelta = Math.max(-2.5, Math.min(2.0, hours - 6.5));
+  const restingHeartRate = Math.round(
+    Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
+  );
+  const hrvMs = Math.round(
+    Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
+  );
+  return {
+    deepSleepHours,
+    remSleepHours,
+    lightSleepHours,
+    awakeMinutes,
+    restingHeartRate,
+    hrvMs,
+  };
+}
+
+const baseline70kg = approximateSleepBiometricsForIndianMale70kg(7.5, 8);
+assert.equal(baseline70kg.restingHeartRate, 62, "70 kg Indian baseline RHR should be 62 bpm");
+assert.equal(baseline70kg.hrvMs, 60, "70 kg Indian baseline HRV should be 60 ms");
+assert.equal(baseline70kg.deepSleepHours, 1.5);
+assert.equal(baseline70kg.remSleepHours, 1.6);
+
+const poorSleep70kg = approximateSleepBiometricsForIndianMale70kg(0, 2);
+assert.equal(poorSleep70kg.deepSleepHours, 0);
+assert.equal(poorSleep70kg.awakeMinutes, 0);
+assert(poorSleep70kg.restingHeartRate >= 48 && poorSleep70kg.restingHeartRate <= 84);
+assert(poorSleep70kg.hrvMs >= 25 && poorSleep70kg.hrvMs <= 95);
+
+// Verify Workouts removed RPE/Volume table headers, Nutrition DB exists with Indian+Global foods, and About Us kept Industry Research
+const nutritionDbCode = fs.readFileSync(
+  path.join(root, "src/lib/nutritionDatabase.ts"),
+  "utf-8"
+);
+assert(nutritionDbCode.includes("Grilled Chicken Breast"), "Global Chicken Breast present");
+assert(nutritionDbCode.includes("Salmon Fillet"), "Global Salmon Fillet present");
+assert(nutritionDbCode.includes("Whole Wheat Chapati"), "Indian Chapati present");
+assert(nutritionDbCode.includes("ICMR-NIN (India)"), "ICMR-NIN Indian standard tagged");
+assert(nutritionDbCode.includes("USDA Global"), "USDA Global standard tagged");
+
+assert(!dashboardCode.includes('id="session-rpe"'), "Workouts session RPE removed");
+assert(!dashboardCode.includes("Set ${sIdx + 1} RPE"), "Workouts table RPE removed");
+assert(dashboardCode.includes("About Us"), "About Us section present");
+assert(
+  dashboardCode.includes("Industry Market Research &amp; Clinical Best Practices Applied") ||
+    dashboardCode.includes("Industry Market Research & Clinical Best Practices Applied"),
+  "Industry Market Research & Clinical Best Practices subsection retained"
+);
 
 console.log("ALL TECH-TESTER INVARIANTS PASSED!");

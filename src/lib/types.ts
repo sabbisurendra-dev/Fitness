@@ -32,6 +32,10 @@ export interface MealEntry {
   protein: number;
   carbs: number;
   fats: number;
+  fiberGrams?: number;
+  waterLiters?: number;
+  portionLabel?: string;
+  weightGrams?: number;
   note: string;
 }
 
@@ -173,7 +177,58 @@ export interface SufficiencyAnalysis {
   };
 }
 
+export function approximateSleepBiometricsForIndianMale70kg(
+  totalHours: number,
+  sleepQuality: number
+): {
+  deepSleepHours: number;
+  remSleepHours: number;
+  lightSleepHours: number;
+  awakeMinutes: number;
+  restingHeartRate: number;
+  hrvMs: number;
+} {
+  const hours = Math.max(0, Math.min(16, Number(totalHours) || 0));
+  const quality = Math.max(1, Math.min(10, Number(sleepQuality) || 7));
+
+  const deepRatio = 0.15 + (quality / 10) * 0.065;
+  const remRatio = 0.18 + (quality / 10) * 0.05;
+
+  const deepSleepHours = Number((hours * deepRatio).toFixed(1));
+  const remSleepHours = Number((hours * remRatio).toFixed(1));
+  const lightSleepHours = Number(
+    Math.max(0, hours - deepSleepHours - remSleepHours).toFixed(1)
+  );
+  const awakeMinutes =
+    hours === 0 ? 0 : Math.max(5, Math.round(35 - quality * 2.2));
+
+  // Calibrated for a healthy 70 kg Indian adult male baseline (62 bpm RHR, 60 ms HRV at 7.5h, 8/10 quality)
+  const sleepDelta = Math.max(-2.5, Math.min(2.0, hours - 6.5));
+  const restingHeartRate = Math.round(
+    Math.max(48, Math.min(84, 68 - (quality - 5) * 1.4 - sleepDelta * 1.8))
+  );
+  const hrvMs = Math.round(
+    Math.max(25, Math.min(95, 42 + (quality - 4) * 3.5 + sleepDelta * 4))
+  );
+
+  return {
+    deepSleepHours,
+    remSleepHours,
+    lightSleepHours,
+    awakeMinutes,
+    restingHeartRate,
+    hrvMs,
+  };
+}
+
 export function createDefaultDailyEntry(date: string): DailyEntry {
+  const defaultSleepHours = 7.5;
+  const defaultSleepQuality = 8;
+  const approxSleep = approximateSleepBiometricsForIndianMale70kg(
+    defaultSleepHours,
+    defaultSleepQuality
+  );
+
   return {
     date,
     dailyNote: "",
@@ -232,7 +287,7 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
       waterTargetLiters: 3.5,
       fiberGrams: 32,
       fiberTargetGrams: 30,
-      useMealSum: false,
+      useMealSum: true,
       note: "Pre-workout carbs 90m before gym; high-protein dinner 3h before bed.",
       meals: [
         {
@@ -243,6 +298,10 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
           protein: 48,
           carbs: 78,
           fats: 14,
+          fiberGrams: 11,
+          waterLiters: 0.3,
+          portionLabel: "1 large bowl (350g)",
+          weightGrams: 350,
           note: "Pre-workout fuel",
         },
         {
@@ -253,6 +312,10 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
           protein: 64,
           carbs: 88,
           fats: 24,
+          fiberGrams: 10,
+          waterLiters: 0.3,
+          portionLabel: "1 plate (420g)",
+          weightGrams: 420,
           note: "Post-workout recovery meal",
         },
         {
@@ -263,7 +326,25 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
           protein: 63,
           carbs: 84,
           fats: 34,
+          fiberGrams: 11,
+          waterLiters: 0.3,
+          portionLabel: "1 dinner plate (450g)",
+          weightGrams: 450,
           note: "Finished eating 3 hrs before sleep for HRV optimization",
+        },
+        {
+          id: "m-4",
+          time: "21:00",
+          name: "Drinking Water & Electrolytes",
+          calories: 0,
+          protein: 0,
+          carbs: 0,
+          fats: 0,
+          fiberGrams: 0,
+          waterLiters: 2.5,
+          portionLabel: "10 glasses (2500ml)",
+          weightGrams: 2500,
+          note: "Daily hydration tracked across training & recovery",
         },
       ],
       customMetrics: [
@@ -291,17 +372,17 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
       ],
     },
     sleep: {
-      totalHours: 7.8,
-      deepSleepHours: 1.6,
-      remSleepHours: 1.9,
-      lightSleepHours: 4.3,
-      awakeMinutes: 18,
-      sleepQuality: 9,
+      totalHours: defaultSleepHours,
+      deepSleepHours: approxSleep.deepSleepHours,
+      remSleepHours: approxSleep.remSleepHours,
+      lightSleepHours: approxSleep.lightSleepHours,
+      awakeMinutes: approxSleep.awakeMinutes,
+      sleepQuality: defaultSleepQuality,
       bedtime: "22:45",
-      wakeTime: "06:35",
-      restingHeartRate: 54,
-      hrvMs: 78,
-      note: "Cool room (19°C), magnesium glycinate 400mg before bed. Woke up refreshed without alarm.",
+      wakeTime: "06:15",
+      restingHeartRate: approxSleep.restingHeartRate,
+      hrvMs: approxSleep.hrvMs,
+      note: "Approximated for a standard 70 kg Indian man (7.5h sleep, 8/10 quality). Edit anytime if wearable metrics differ.",
     },
     aiCoach: {
       messages: [],
@@ -322,7 +403,7 @@ export function createDefaultUserProfile(slug: string): UserProfileStore {
     slug,
     displayName: cleanName,
     weightUnit: "kg",
-    bodyweight: 76,
+    bodyweight: 70,
     baselineSleepNeedHours: 7.5,
     days: {
       [today]: createDefaultDailyEntry(today),
