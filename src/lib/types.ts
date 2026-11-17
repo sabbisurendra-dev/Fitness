@@ -76,12 +76,55 @@ export interface SleepLog {
   note: string;
 }
 
+export interface AiCoachMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  model?: string;
+  interactionId?: string;
+  createdAt: string;
+}
+
+export interface AiRecoveryPrescription {
+  headline: string;
+  summary: string;
+  actionItems: string[];
+  recommendedMeal?: {
+    name: string;
+    time: string;
+    calories: number;
+    protein: number;
+    carbs: number;
+    fats: number;
+    note: string;
+  };
+  recommendedExercise?: {
+    name: string;
+    muscleGroup: string;
+    weight: number;
+    reps: number;
+    sets: number;
+    rpe: number;
+    note: string;
+  };
+  model?: string;
+  interactionId?: string;
+  generatedAt: string;
+}
+
+export interface DailyAiCoachState {
+  lastInteractionId?: string;
+  messages: AiCoachMessage[];
+  prescription?: AiRecoveryPrescription | null;
+}
+
 export interface DailyEntry {
   date: string; // YYYY-MM-DD
   dailyNote: string;
   workout: WorkoutSession;
   nutrition: NutritionLog;
   sleep: SleepLog;
+  aiCoach?: DailyAiCoachState;
   updatedAt: string;
 }
 
@@ -259,6 +302,10 @@ export function createDefaultDailyEntry(date: string): DailyEntry {
       restingHeartRate: 54,
       hrvMs: 78,
       note: "Cool room (19°C), magnesium glycinate 400mg before bed. Woke up refreshed without alarm.",
+    },
+    aiCoach: {
+      messages: [],
+      prescription: null,
     },
     updatedAt: new Date().toISOString(),
   };

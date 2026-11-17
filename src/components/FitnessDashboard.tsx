@@ -27,6 +27,10 @@ import {
   Clock,
   HeartPulse,
   ArrowUpRight,
+  Send,
+  Bot,
+  RotateCcw,
+  Wand2,
 } from "lucide-react";
 import {
   UserProfileStore,
@@ -35,6 +39,8 @@ import {
   ExerciseSet,
   MealEntry,
   CustomHealthMetric,
+  AiCoachMessage,
+  AiRecoveryPrescription,
   createDefaultUserProfile,
   createDefaultDailyEntry,
   calculateSufficiencyAnalysis,
@@ -78,7 +84,21 @@ export default function FitnessDashboard({
   const [colorSchemeOverride, setColorSchemeOverride] = useState<
     "light dark" | "dark" | "light"
   >("dark");
+  const [geminiModel, setGeminiModel] = useState<
+    "gemini-4-hydrogen" | "gemini-4-argon"
+  >("gemini-4-hydrogen");
+  const [geminiLoadingMode, setGeminiLoadingMode] = useState<
+    null | "optimize-day" | "smart-log" | "coach"
+  >(null);
+  const [smartLogInput, setSmartLogInput] = useState("");
+  const [coachInput, setCoachInput] = useState("");
+  const [smartLogError, setSmartLogError] = useState("");
+  const [coachError, setCoachError] = useState("");
+  const [geminiStatusMessage, setGeminiStatusMessage] = useState("");
+  const [showAiHub, setShowAiHub] = useState(true);
 
+  const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isInitialLoadRef = useRef(true);
 
@@ -624,9 +644,9 @@ export default function FitnessDashboard({
                 <input
                   type="text"
                   placeholder="enter-name"
-                  autocorrect="off"
-                  autocapitalize="none"
-                  spellcheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   value={customSlugInput}
                   onChange={(e) => setCustomSlugInput(e.target.value)}
                   className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
