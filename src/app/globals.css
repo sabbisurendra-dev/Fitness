@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+:root {
+  --bg-canvas-light: #f8fafc;
+  --bg-canvas-dark: #090d16;
+  --bg-surface-light: #ffffff;
+  --bg-surface-dark: #111827;
+  --bg-elevated-light: #f1f5f9;
+  --bg-elevated-dark: #1e293b;
+  --text-primary-light: #0f172a;
+  --text-primary-dark: #f8fafc;
+  --text-muted-light: #64748b;
+  --text-muted-dark: #94a3b8;
+  --border-subtle-light: #e2e8f0;
+  --border-subtle-dark: #1f2937;
+
+  /* Default fallback values */
+  --bg-canvas: var(--bg-canvas-dark);
+  --bg-surface: var(--bg-surface-dark);
+  --bg-elevated: var(--bg-elevated-dark);
+  --text-primary: var(--text-primary-dark);
+  --text-muted: var(--text-muted-dark);
+  --border-subtle: var(--border-subtle-dark);
+
+  @media (prefers-color-scheme: light) {
+    --bg-canvas: var(--bg-canvas-light);
+    --bg-surface: var(--bg-surface-light);
+    --bg-elevated: var(--bg-elevated-light);
+    --text-primary: var(--text-primary-light);
+    --text-muted: var(--text-muted-light);
+    --border-subtle: var(--border-subtle-light);
+  }
+
+  /* Modern light-dark() adaptive tokens */
+  @supports (color: light-dark(white, black)) {
+    --bg-canvas: light-dark(var(--bg-canvas-light), var(--bg-canvas-dark));
+    --bg-surface: light-dark(var(--bg-surface-light), var(--bg-surface-dark));
+    --bg-elevated: light-dark(var(--bg-elevated-light), var(--bg-elevated-dark));
+    --text-primary: light-dark(var(--text-primary-light), var(--text-primary-dark));
+    --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
+    --border-subtle: light-dark(var(--border-subtle-light), var(--border-subtle-dark));
+  }
+
+  /* MANDATORY: Apply color-scheme to :root and sync with <meta name="color-scheme"> */
+  color-scheme: light dark;
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
+}
+
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
+p, li {
+  text-wrap: pretty;
+}
+
+/* Auto-growing note textareas per form-fields-automatically-fit-contents */
+.auto-grow-textarea {
+  field-sizing: content;
+  height: auto;
+  width: 100%;
+  min-block-size: 2.75lh;
+  max-block-size: 10lh;
+}
+
+/* Prevent iOS Safari zoom on input focus and ensure accessible tap targets */
+@media (pointer: coarse) {
+  input:not([type="checkbox"], [type="radio"]),
+  select,
+  textarea {
+    font-size: max(1rem, 1em);
+    min-block-size: 40px;
+  }
+}
