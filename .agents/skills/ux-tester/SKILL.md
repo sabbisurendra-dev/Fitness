@@ -93,3 +93,23 @@ Verify across all three canonical viewport widths (`360px` Mobile, `768px` Table
 ## Custom Project UX Test Cases (User-Added)
 
 <!-- Append new user-spoken or user-typed UX test cases below this line using the UX-CUSTOM-XX format -->
+
+- **UX-CUSTOM-01 (Morning Check-In Drawer, Completion & 2 PM Sleep Nudge)**:
+  - **Check**: Open the conversational slide-over Morning Check-In `<dialog>` drawer when Sleep is unlogged, test `Skip Sleep for Now`, then re-open, enter `Total Sleep Duration` + `Sleep Score (1–10)` + optional `Body Weight` / `Body Fat %`, and click `Complete Check-In`.
+  - **Pass**: Auto-approximated sleep metrics update live; once Sleep is logged (`totalHours > 0`), the prominent check-in prompt hides (`Morning Check-In Done`), and the status indicator shows Sleep logged; if Sleep is unlogged at/after 14:00 local time, the Afternoon Sleep Nudge banner appears.
+  - **Fail**: Drawer blocks scrolling on body via `overflow: hidden`, fails to hide prominent prompt after sleep is entered, or loses body metrics edits.
+
+- **UX-CUSTOM-02 (WHOOP 5 Workout Routines, Live Timer, Type-Aware Presets & 1–10 Rating)**:
+  - **Check**: Tag `Upper Body Home Gym` (verify exercises & rep ranges load with previous session weights if available), toggle `Start Workout` -> `Stop Workout`, select a `Bodyweight` preset (`Push-Ups` showing `0 (BW)`), log quick `Cardio` duration (`15m`), and select a `1–10` post-workout effort rating.
+  - **Pass**: Live timer ticks cleanly, stopping captures duration in minutes, bodyweight exercises lock weight to `0` (`0 (BW)`), cardio updates `cardioMinutes`, and selecting `1–10` immediately updates Workout Intensity % and Workout Strain (/21).
+  - **Fail**: Bodyweight preset forces manual weight entry or non-zero default weight, or rating does not update Strain/Intensity.
+
+- **UX-CUSTOM-03 (Dual-Mode Quick Nutrition & Pending Indicators)**:
+  - **Check**: Toggle between `Quick Totals (kcal + Protein)` and `Log 3–4 Foods Consumed`, add a quick food item, and test `Skip Nutrition`. Check the top Daily Rhythm pending indicator chips.
+  - **Pass**: `Nutrition: Not logged yet` indicator updates to logged macros once calories/protein or meals are added; skipping sets neutral skipped state without blocking other modules.
+  - **Fail**: Toggling mode overwrites user values unexpectedly or fails to show pending status when unlogged.
+
+- **UX-CUSTOM-04 (WHOOP-Style 100-Habit Journal)**:
+  - **Check**: Log a `Yes / No / Blank` habit (e.g., `Morning Sunlight`) and a `Dosage` habit (`Creatine Monohydrate` `5 g` quick chip), open `Choose Habits (100+ Catalog)`, filter/search, toggle active habits, and add a custom habit.
+  - **Pass**: At least 100 catalog habits are searchable across 5 categories; active habits persist per profile; individual habits can be left blank or cleared without affecting other days.
+  - **Fail**: Catalog shows fewer than 100 habits, blank habits coerce to `"no"`/`"0"`, or dialog overflows at `360px`.

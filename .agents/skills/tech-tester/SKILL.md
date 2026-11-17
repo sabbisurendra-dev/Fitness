@@ -99,3 +99,18 @@ Verify the mathematical and state invariants of `calculateSufficiencyAnalysis(en
 ## Custom Project Tech Test Cases (User-Added)
 
 <!-- Append new user-spoken or user-typed technical test cases below this line using the TECH-CUSTOM-XX format -->
+
+- **TECH-CUSTOM-01 (Default Workout Routines & Previous Session Carryover)**:
+  - **Check**: Verify `DEFAULT_WORKOUT_ROUTINES` in `src/lib/routinesAndHabits.ts` contains `Upper Body Home Gym`, `Lower Body Home Gym`, `Upper Body External Gym`, and `Lower Body External Gym`, and `buildRoutineExercisesWithHistory` in `src/lib/historyAndStaples.ts` carries over prior weights/reps while locking `bodyweight` exercises to `weight: 0`.
+  - **Pass**: All 4 core routines resolve with valid exercise templates and bodyweight exercises enforce `weight: 0`.
+  - **Fail**: Missing routine template or bodyweight carryover applies non-zero weights.
+
+- **TECH-CUSTOM-02 (100-Habit Catalog & Additive Storage Compatibility)**:
+  - **Check**: Verify `HABIT_CATALOG` in `src/lib/routinesAndHabits.ts` defines `>= 100` unique habits supporting `"yes_no"` and `"dosage"` formats, and new fields on `DailyEntry` (`bodyMetrics`, `habitLogs`, `checkIn`, `dailyWorkoutRating`) and `UserProfileStore` (`workoutRoutines`, `activeHabitIds`, `customHabitDefinitions`, `bodyFatPct`) are optional.
+  - **Pass**: Legacy profiles without new fields load cleanly without runtime errors.
+  - **Fail**: Missing optional guards cause undefined crashes on legacy JSON profiles.
+
+- **TECH-CUSTOM-03 (Post-Workout 1–10 Rating Strain & Intensity Math)**:
+  - **Check**: Verify `calculateSufficiencyAnalysis` factors `workout.workoutRating ?? entry.dailyWorkoutRating ?? workout.sessionRpe` into `strainScore` and `workoutIntensityScore` while preserving rest-day `2.0` strain and `<= 20.8` max strain bounds.
+  - **Pass**: `node scripts/verify-tech.mjs` passes all existing and custom invariants.
+  - **Fail**: Any invariant fails or breaks backward-compatible bounds.

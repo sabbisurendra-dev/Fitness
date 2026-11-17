@@ -8,6 +8,7 @@ const root = "/Users/sabbisurendra/Downloads/Fitness";
 const srcFiles = [
   "src/lib/types.ts",
   "src/lib/nutritionDatabase.ts",
+  "src/lib/routinesAndHabits.ts",
   "src/app/api/state/route.ts",
   "src/app/api/gemini/route.ts",
   "src/components/FitnessDashboard.tsx",
@@ -70,7 +71,16 @@ function calculateSufficiencyAnalysis(entry, profile) {
   const totalActiveMinutes =
     (Number(workout.gymDurationMinutes) || 0) +
     (Number(workout.cardioMinutes) || 0);
-  const rpeFactor = Math.max(1, Math.min(10, Number(workout.sessionRpe) || 6));
+  const effectiveWorkoutRating = Math.max(
+    1,
+    Math.min(
+      10,
+      Number(
+        workout.workoutRating ?? entry.dailyWorkoutRating ?? workout.sessionRpe
+      ) || 6
+    )
+  );
+  const rpeFactor = effectiveWorkoutRating;
 
   const durationStrain = Math.min(12, (totalActiveMinutes / 60) * 6.5);
   const volumeStrain = Math.min(6, (totalSets / 18) * 4.5);
@@ -80,6 +90,20 @@ function calculateSufficiencyAnalysis(entry, profile) {
       ? 2.0
       : Math.min(20.8, Math.max(2.0, durationStrain + volumeStrain + intensityStrain));
   const strainScore = Number(rawStrain.toFixed(1));
+  const workoutIntensityScore =
+    totalActiveMinutes === 0 && totalSets === 0
+      ? 0
+      : Math.min(
+          100,
+          Math.max(
+            15,
+            Math.round(
+              effectiveWorkoutRating * 7 +
+                Math.min(20, totalSets * 1.1) +
+                Math.min(10, totalActiveMinutes / 6)
+            )
+          )
+        );
 
   const strainSleepAddon =
     strainScore > 14 ? 0.8 : strainScore > 10 ? 0.5 : strainScore > 6 ? 0.25 : 0;
@@ -140,6 +164,8 @@ function calculateSufficiencyAnalysis(entry, profile) {
   return {
     readinessScore,
     strainScore,
+    workoutIntensityScore,
+    effectiveWorkoutRating,
     totalVolume,
     totalSets,
     totalReps,
@@ -311,6 +337,77 @@ assert(
   dashboardCode.includes("Industry Market Research &amp; Clinical Best Practices Applied") ||
     dashboardCode.includes("Industry Market Research & Clinical Best Practices Applied"),
   "Industry Market Research & Clinical Best Practices subsection retained"
+);
+
+// 6. Verify Morning Check-In Drawer, Routines, Post-Workout Rating, Dual-Mode Nutrition & 100 Habits
+const routinesAndHabitsCode = fs.readFileSync(
+  path.join(root, "src/lib/routinesAndHabits.ts"),
+  "utf-8"
+);
+for (const routineName of [
+  "Upper Body Home Gym",
+  "Lower Body Home Gym",
+  "Upper Body External Gym",
+  "Lower Body External Gym",
+]) {
+  assert(
+    routinesAndHabitsCode.includes(routineName),
+    `Default routine "${routineName}" present`
+  );
+}
+const habitBlockMatch = routinesAndHabitsCode.match(
+  /export const HABIT_CATALOG:[\s\S]*?\n\];/
+);
+assert(habitBlockMatch, "HABIT_CATALOG array present");
+const habitCount = (habitBlockMatch[0].match(/\{\s*id:\s*"/g) || []).length;
+assert(
+  habitCount >= 100,
+  `HABIT_CATALOG must have >= 100 habits, found ${habitCount}`
+);
+assert(
+  routinesAndHabitsCode.includes('inputType: "yes_no"') &&
+    routinesAndHabitsCode.includes('inputType: "dosage"'),
+  "Habits support both yes_no and dosage formats"
+);
+assert(
+  routinesAndHabitsCode.includes('exerciseType: "bodyweight"') &&
+    routinesAndHabitsCode.includes('exerciseType: "cardio"') &&
+    routinesAndHabitsCode.includes('exerciseType: "strength"'),
+  "Exercise presets categorize strength, bodyweight, and cardio"
+);
+assert(
+  typesCode.includes("workoutIntensityScore") &&
+    typesCode.includes("effectiveWorkoutRating") &&
+    typesCode.includes("dailyWorkoutRating"),
+  "Sufficiency and DailyEntry include 1-10 workout rating & intensity"
+);
+assert(
+  historyStaplesCode.includes("findPreviousRoutineSession") &&
+    historyStaplesCode.includes("buildRoutineExercisesWithHistory"),
+  "Routine previous session weight/rep carryover exported"
+);
+
+// Verify 1-10 post-workout rating raises strain and workoutIntensityScore
+const lowRated = calculateSufficiencyAnalysis(
+  {
+    workout: { gymDurationMinutes: 45, cardioMinutes: 0, workoutRating: 3, exercises: [] },
+    nutrition: { calories: 2000, calorieTarget: 2400, protein: 140, proteinTarget: 170, waterLiters: 3, waterTargetLiters: 3.5 },
+    sleep: { totalHours: 7.5, deepSleepHours: 1.5 },
+  },
+  { baselineSleepNeedHours: 7.5 }
+);
+const highRated = calculateSufficiencyAnalysis(
+  {
+    workout: { gymDurationMinutes: 45, cardioMinutes: 0, workoutRating: 9, exercises: [] },
+    nutrition: { calories: 2000, calorieTarget: 2400, protein: 140, proteinTarget: 170, waterLiters: 3, waterTargetLiters: 3.5 },
+    sleep: { totalHours: 7.5, deepSleepHours: 1.5 },
+  },
+  { baselineSleepNeedHours: 7.5 }
+);
+assert(
+  highRated.strainScore > lowRated.strainScore &&
+    highRated.workoutIntensityScore > lowRated.workoutIntensityScore,
+  "Higher 1-10 workout rating increases Strain and Workout Intensity"
 );
 
 console.log("ALL TECH-TESTER INVARIANTS PASSED!");

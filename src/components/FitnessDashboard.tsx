@@ -41,12 +41,30 @@ import {
   Pin,
   Copy,
   Calendar,
+  Play,
+  Square,
+  Timer,
+  Star,
+  ListChecks,
+  X,
+  Bell,
+  SkipForward,
+  SlidersHorizontal,
+  Zap,
+  Layers,
+  Heart,
+  Save,
 } from "lucide-react";
 import {
   UserProfileStore,
   DailyEntry,
   WorkoutExercise,
   ExerciseSet,
+  ExerciseType,
+  WorkoutRoutineTemplate,
+  HabitDefinition,
+  HabitCategory,
+  DailyHabitEntry,
   MealEntry,
   CustomHealthMetric,
   AiCoachMessage,
@@ -68,9 +86,20 @@ import {
   computePeriodSummary,
   findPreviousWorkoutSession,
   findPreviousExerciseSets,
+  findPreviousRoutineSession,
+  buildRoutineExercisesWithHistory,
   computeUserFrequentStaples,
   UserFrequentStaple,
 } from "@/lib/historyAndStaples";
+import {
+  CATEGORIZED_EXERCISE_PRESETS,
+  DEFAULT_WORKOUT_ROUTINES,
+  HABIT_CATALOG,
+  DEFAULT_ACTIVE_HABIT_IDS,
+  getEffectiveRoutines,
+  getAllHabitDefinitions,
+  getActiveHabitsForProfile,
+} from "@/lib/routinesAndHabits";
 
 interface FitnessDashboardProps {
   initialSlug?: string;
@@ -235,6 +264,37 @@ export default function FitnessDashboard({
   const [stapleQuantities, setStapleQuantities] = useState<Record<string, number>>({});
   const [lastSavedTimeLabel, setLastSavedTimeLabel] = useState<string>("");
 
+  // Morning Check-In Drawer, Afternoon Nudge & Live Workout / Dual-Mode Nutrition / Habits states
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [showMorningDrawer, setShowMorningDrawer] = useState(false);
+  const [currentHour, setCurrentHour] = useState<number>(12);
+  const [liveElapsedSeconds, setLiveElapsedSeconds] = useState<number>(0);
+  const [presetTypeFilter, setPresetTypeFilter] = useState<"all" | ExerciseType>("all");
+  const [quickCardioType, setQuickCardioType] = useState<string>("Running");
+  const [quickCardioMins, setQuickCardioMins] = useState<number>(20);
+  const [showSaveRoutineForm, setShowSaveRoutineForm] = useState(false);
+  const [newRoutineName, setNewRoutineName] = useState("");
+  const [newRoutineEnv, setNewRoutineEnv] = useState<"home" | "external">("home");
+  const [workoutStatusBanner, setWorkoutStatusBanner] = useState("");
+  const [quickFoodName, setQuickFoodName] = useState("");
+  const [quickFoodCalories, setQuickFoodCalories] = useState<number>(0);
+  const [quickFoodProtein, setQuickFoodProtein] = useState<number>(0);
+  const [showHabitCatalogDialog, setShowHabitCatalogDialog] = useState(false);
+  const [habitSearchQuery, setHabitSearchQuery] = useState("");
+  const [habitCategoryFilter, setHabitCategoryFilter] = useState<"All" | HabitCategory>("All");
+  const [customHabitName, setCustomHabitName] = useState("");
+  const [customHabitType, setCustomHabitType] = useState<"yes_no" | "dosage">("yes_no");
+  const [customHabitUnit, setCustomHabitUnit] = useState("g");
+  const [customHabitDefault, setCustomHabitDefault] = useState("5");
+  const [customHabitCategory, setCustomHabitCategory] = useState<HabitCategory>("Supplements");
+
+  const morningDrawerRef = useRef<HTMLDialogElement | null>(null);
+  const habitCatalogDialogRef = useRef<HTMLDialogElement | null>(null);
+  const nutritionSectionRef = useRef<HTMLElement | null>(null);
+  const workoutSectionRef = useRef<HTMLElement | null>(null);
+  const habitsSectionRef = useRef<HTMLElement | null>(null);
+  const hasAutoOpenedDrawerRef = useRef(false);
+
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -363,6 +423,9 @@ export default function FitnessDashboard({
         }
       } finally {
         isInitialLoadRef.current = false;
+        if (!cancelled) {
+          setProfileLoaded(true);
+        }
       }
     }
     loadProfile();
@@ -552,26 +615,69 @@ export default function FitnessDashboard({
     }
   };
 
-  // Workout helpers with automatic progressive overload carryover from prior sessions
-  const addExercise = (presetName = "", presetGroup = "Strength") => {
+  // Workout helpers with automatic progressive overload carryover & exercise type awareness
+  const addExercise = (
+    presetName = "",
+    presetGroup = "Strength",
+    options?: {
+      exerciseType?: ExerciseType;
+      defaultWeight?: number;
+      defaultReps?: number;
+    }
+  ) => {
+    const inferredType: ExerciseType =
+      options?.exerciseType ||
+      (presetName.toLowerCase().includes("push-up") ||
+      presetName.toLowerCase().includes("pull-up") ||
+      presetName.toLowerCase().includes("chin-up") ||
+      presetName.toLowerCase().includes("bodyweight") ||
+      presetName.toLowerCase().includes("dips")
+        ? "bodyweight"
+        : "strength");
+
+    if (inferredType === "cardio") {
+      setQuickCardioType(presetName || "Running");
+      updateCurrentDay((d) => ({
+        ...d,
+        workout: {
+          ...d.workout,
+          skipped: false,
+          cardioType: presetName || d.workout.cardioType || "Running",
+          cardioMinutes:
+            d.workout.cardioMinutes > 0 ? d.workout.cardioMinutes : 20,
+        },
+        checkIn: { ...d.checkIn, workoutSkipped: false },
+      }));
+      return;
+    }
+
     const prev = presetName
       ? findPreviousExerciseSets(profile, selectedDate, presetName)
       : null;
+    const isBw = inferredType === "bodyweight";
     const carriedSets: ExerciseSet[] =
       prev && prev.sets.length > 0
         ? prev.sets.map((s, idx) => ({
             id: `s-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
-            weight: s.weight,
+            weight: isBw ? 0 : s.weight,
             reps: s.reps,
             rpe: s.rpe,
             completed: true,
           }))
-        : [{ id: `s-${Date.now()}`, weight: 40, reps: 10, rpe: 8, completed: true }];
+        : [
+            {
+              id: `s-${Date.now()}`,
+              weight: isBw ? 0 : options?.defaultWeight ?? 40,
+              reps: options?.defaultReps ?? (isBw ? 15 : 10),
+              completed: true,
+            },
+          ];
 
     const newEx: WorkoutExercise = {
       id: `ex-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: presetName || "New Exercise",
       muscleGroup: presetGroup,
+      exerciseType: inferredType,
       note: prev ? `Carried over from ${prev.sourceDate}` : "",
       sets: carriedSets,
     };
@@ -579,9 +685,158 @@ export default function FitnessDashboard({
       ...d,
       workout: {
         ...d.workout,
+        skipped: false,
         exercises: [...d.workout.exercises, newEx],
       },
+      checkIn: { ...d.checkIn, workoutSkipped: false },
     }));
+  };
+
+  const applyWorkoutRoutine = (routine: WorkoutRoutineTemplate) => {
+    const built = buildRoutineExercisesWithHistory(
+      profile,
+      selectedDate,
+      routine
+    );
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        routineId: routine.id,
+        sessionTitle: routine.name,
+        skipped: false,
+        exercises: built.exercises,
+      },
+      checkIn: { ...d.checkIn, workoutSkipped: false },
+    }));
+    setWorkoutStatusBanner(
+      built.sourceDate
+        ? `Tagged "${routine.name}" and pre-filled previous weights & reps from ${built.sourceDate}.`
+        : `Tagged "${routine.name}" with ${built.exercises.length} baseline exercises & rep ranges.`
+    );
+  };
+
+  const startLiveWorkout = () => {
+    const nowIso = new Date().toISOString();
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        startedAt: nowIso,
+        endedAt: null,
+        skipped: false,
+      },
+      checkIn: { ...d.checkIn, workoutSkipped: false },
+    }));
+    setLiveElapsedSeconds(0);
+    setWorkoutStatusBanner("Live workout timer started. Tag a routine or log sets as you go.");
+  };
+
+  const stopLiveWorkout = () => {
+    const startedMs = currentDay.workout.startedAt
+      ? Date.parse(currentDay.workout.startedAt)
+      : 0;
+    const elapsedMins =
+      startedMs > 0
+        ? Math.max(1, Math.round((Date.now() - startedMs) / 60000))
+        : Math.max(1, currentDay.workout.gymDurationMinutes || 45);
+    const nowIso = new Date().toISOString();
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        endedAt: nowIso,
+        gymDurationMinutes: elapsedMins,
+        skipped: false,
+      },
+    }));
+    setWorkoutStatusBanner(
+      `Workout stopped (${elapsedMins} min captured). Rate your workout out of 10 below to finalize strain!`
+    );
+  };
+
+  const setWorkoutRating = (rating: number) => {
+    const clamped = Math.max(1, Math.min(10, Math.round(rating)));
+    updateCurrentDay((d) => ({
+      ...d,
+      dailyWorkoutRating: clamped,
+      workout: {
+        ...d.workout,
+        workoutRating: clamped,
+        sessionRpe: clamped,
+        skipped: false,
+      },
+    }));
+  };
+
+  const skipWorkoutToday = () => {
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        skipped: true,
+        startedAt: null,
+        endedAt: null,
+      },
+      checkIn: { ...d.checkIn, workoutSkipped: true },
+    }));
+    setWorkoutStatusBanner("Marked today as Rest / Skipped workout.");
+  };
+
+  const logQuickCardio = (cardioName: string, minutes: number) => {
+    const mins = Math.max(1, Math.round(minutes));
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        skipped: false,
+        cardioType: cardioName.trim() || "Cardio Training",
+        cardioMinutes: mins,
+      },
+      checkIn: { ...d.checkIn, workoutSkipped: false },
+    }));
+    setWorkoutStatusBanner(`Logged ${mins} min of ${cardioName.trim() || "Cardio Training"}.`);
+  };
+
+  const saveCurrentWorkoutAsRoutine = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = newRoutineName.trim() || currentDay.workout.sessionTitle.trim();
+    if (!cleanName || currentDay.workout.exercises.length === 0) return;
+    const routineId = `custom-${cleanName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .slice(0, 32)}-${Date.now().toString(36).slice(-4)}`;
+    const newRoutine: WorkoutRoutineTemplate = {
+      id: routineId,
+      name: cleanName,
+      environment: newRoutineEnv,
+      focus: `${currentDay.workout.exercises.length} saved exercises`,
+      exercises: currentDay.workout.exercises.map((ex, idx) => {
+        const firstSet = ex.sets[0];
+        const isBw = ex.exerciseType === "bodyweight" || (firstSet && firstSet.weight === 0);
+        return {
+          id: `tpl-${Date.now()}-${idx}`,
+          name: ex.name,
+          muscleGroup: ex.muscleGroup || "Strength",
+          exerciseType: isBw ? "bodyweight" : "strength",
+          defaultSets: Math.max(1, ex.sets.length),
+          repRange: ex.targetRepRange || `${Math.max(1, (firstSet?.reps || 10) - 2)}-${(firstSet?.reps || 10) + 2}`,
+          baselineWeight: isBw ? 0 : firstSet?.weight ?? 20,
+          baselineReps: firstSet?.reps ?? 10,
+        };
+      }),
+    };
+    updateProfileMeta((p) => ({
+      ...p,
+      workoutRoutines: [newRoutine, ...(p.workoutRoutines || [])],
+    }));
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: { ...d.workout, routineId: newRoutine.id, sessionTitle: newRoutine.name },
+    }));
+    setNewRoutineName("");
+    setShowSaveRoutineForm(false);
+    setWorkoutStatusBanner(`Saved workout routine "${newRoutine.name}" for 1-tap reuse.`);
   };
 
   const loadPreviousWorkoutIntoToday = () => {
@@ -1338,7 +1593,213 @@ export default function FitnessDashboard({
     setGeminiStatusMessage("Started a fresh Gemini Interactions thread.");
   };
 
+  const addQuickCustomFood = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = quickFoodName.trim();
+    if (!cleanName && quickFoodCalories <= 0 && quickFoodProtein <= 0) return;
+    const newMeal: MealEntry = {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: new Date().toTimeString().slice(0, 5),
+      name: cleanName || "Quick Food",
+      calories: Math.max(0, Math.round(quickFoodCalories)),
+      protein: Math.max(0, Math.round(quickFoodProtein)),
+      carbs: 0,
+      fats: 0,
+      note: "Added via Quick Foods entry",
+    };
+    updateCurrentDay((d) => ({
+      ...d,
+      nutrition: {
+        ...d.nutrition,
+        useMealSum: true,
+        meals: [...d.nutrition.meals, newMeal],
+      },
+      checkIn: { ...d.checkIn, nutritionSkipped: false },
+    }));
+    setQuickFoodName("");
+    setQuickFoodCalories(0);
+    setQuickFoodProtein(0);
+  };
+
+  const updateHabitEntry = (
+    habitId: string,
+    patch: Partial<DailyHabitEntry> | null
+  ) => {
+    updateCurrentDay((d) => {
+      const nextLogs: Record<string, DailyHabitEntry> = {
+        ...(d.habitLogs || {}),
+      };
+      if (patch === null) {
+        delete nextLogs[habitId];
+      } else {
+        nextLogs[habitId] = {
+          ...(nextLogs[habitId] || {}),
+          ...patch,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return {
+        ...d,
+        habitLogs: nextLogs,
+        checkIn: { ...d.checkIn, habitsSkipped: false },
+      };
+    });
+  };
+
+  const toggleActiveHabit = (habitId: string) => {
+    updateProfileMeta((p) => {
+      const currentIds =
+        p.activeHabitIds && p.activeHabitIds.length > 0
+          ? p.activeHabitIds
+          : DEFAULT_ACTIVE_HABIT_IDS;
+      const exists = currentIds.includes(habitId);
+      const nextIds = exists
+        ? currentIds.filter((id) => id !== habitId)
+        : [...currentIds, habitId];
+      return {
+        ...p,
+        activeHabitIds: nextIds,
+      };
+    });
+  };
+
+  const handleAddCustomHabit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = customHabitName.trim();
+    if (!clean) return;
+    const newId = `custom-habit-${clean
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .slice(0, 28)}-${Date.now().toString(36).slice(-4)}`;
+    const newDef: HabitDefinition = {
+      id: newId,
+      name: clean,
+      category: customHabitCategory,
+      inputType: customHabitType,
+      ...(customHabitType === "dosage"
+        ? {
+            unit: customHabitUnit.trim() || "units",
+            defaultValue: customHabitDefault.trim() || "1",
+          }
+        : {}),
+    };
+    updateProfileMeta((p) => {
+      const currentIds =
+        p.activeHabitIds && p.activeHabitIds.length > 0
+          ? p.activeHabitIds
+          : DEFAULT_ACTIVE_HABIT_IDS;
+      return {
+        ...p,
+        customHabitDefinitions: [newDef, ...(p.customHabitDefinitions || [])],
+        activeHabitIds: [...currentIds, newId],
+      };
+    });
+    setCustomHabitName("");
+  };
+
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
+
+  const effectiveRoutines = useMemo(
+    () => getEffectiveRoutines(profile),
+    [profile]
+  );
+
+  const allHabitDefinitions = useMemo(
+    () => getAllHabitDefinitions(profile),
+    [profile]
+  );
+
+  const activeHabits = useMemo(
+    () => getActiveHabitsForProfile(profile),
+    [profile]
+  );
+
+  const isSleepLogged = currentDay.sleep.totalHours > 0;
+  const isNutritionLogged =
+    currentDay.nutrition.calories > 0 ||
+    currentDay.nutrition.protein > 0 ||
+    currentDay.nutrition.meals.length > 0;
+  const isWorkoutLive = Boolean(
+    currentDay.workout.startedAt && !currentDay.workout.endedAt
+  );
+  const isWorkoutLogged =
+    currentDay.workout.exercises.length > 0 ||
+    currentDay.workout.gymDurationMinutes > 0 ||
+    currentDay.workout.cardioMinutes > 0;
+
+  const loggedHabitsCount = useMemo(() => {
+    const logs = currentDay.habitLogs || {};
+    return activeHabits.filter((h) => {
+      const entry = logs[h.id];
+      if (!entry) return false;
+      if (h.inputType === "yes_no") {
+        return entry.status === "yes" || entry.status === "no";
+      }
+      return typeof entry.value === "string" && entry.value.trim().length > 0;
+    }).length;
+  }, [activeHabits, currentDay.habitLogs]);
+
+  // Track client hour safely (avoids hydration mismatch) & auto-open conversational Morning Drawer once if sleep isn't logged
+  useEffect(() => {
+    setCurrentHour(new Date().getHours());
+  }, []);
+
+  useEffect(() => {
+    if (
+      profileLoaded &&
+      !hasAutoOpenedDrawerRef.current &&
+      selectedDate === todayStr &&
+      !isSleepLogged &&
+      !currentDay.checkIn?.sleepSkipped
+    ) {
+      hasAutoOpenedDrawerRef.current = true;
+      setShowMorningDrawer(true);
+    }
+  }, [
+    profileLoaded,
+    selectedDate,
+    todayStr,
+    isSleepLogged,
+    currentDay.checkIn?.sleepSkipped,
+  ]);
+
+  // Sync native <dialog> top-layer modals with React state
+  useEffect(() => {
+    const dlg = morningDrawerRef.current;
+    if (!dlg) return;
+    if (showMorningDrawer && !dlg.open) {
+      dlg.showModal();
+    } else if (!showMorningDrawer && dlg.open) {
+      dlg.close();
+    }
+  }, [showMorningDrawer]);
+
+  useEffect(() => {
+    const dlg = habitCatalogDialogRef.current;
+    if (!dlg) return;
+    if (showHabitCatalogDialog && !dlg.open) {
+      dlg.showModal();
+    } else if (!showHabitCatalogDialog && dlg.open) {
+      dlg.close();
+    }
+  }, [showHabitCatalogDialog]);
+
+  // Live workout timer ticker (resilient across page reloads via startedAt ISO timestamp)
+  useEffect(() => {
+    if (!currentDay.workout.startedAt || currentDay.workout.endedAt) {
+      setLiveElapsedSeconds(0);
+      return;
+    }
+    const updateTick = () => {
+      const startedMs = Date.parse(currentDay.workout.startedAt || "");
+      if (startedMs > 0) {
+        setLiveElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+      }
+    };
+    updateTick();
+    const interval = setInterval(updateTick, 1000);
+    return () => clearInterval(interval);
+  }, [currentDay.workout.startedAt, currentDay.workout.endedAt]);
 
   const frequentStaples = useMemo(
     () => computeUserFrequentStaples(profile, 10),
@@ -1682,7 +2143,49 @@ export default function FitnessDashboard({
                   <span className="text-xs text-[var(--text-muted)]">
                     Daily Check-In · {selectedDate}
                   </span>
+
+                  {isSleepLogged ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowMorningDrawer(true)}
+                      className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-medium text-indigo-400 hover:bg-indigo-500/20 transition"
+                    >
+                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                      <span>Morning Check-In Done ({currentDay.sleep.totalHours}h) · Edit</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowMorningDrawer(true)}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-indigo-400 transition shadow-xs"
+                    >
+                      <Moon className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Start Morning Check-In</span>
+                    </button>
+                  )}
                 </div>
+
+                {/* Afternoon Sleep Nudge (Visible if sleep not entered by 2:00 PM / 14:00) */}
+                {!isSleepLogged && selectedDate === todayStr && currentHour >= 14 && (
+                  <div
+                    role="status"
+                    className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center gap-2 text-amber-300">
+                      <Bell className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                      <span>
+                        <strong>Afternoon Sleep Nudge:</strong> You haven&apos;t entered last night&apos;s sleep yet. Just 2 quick inputs calibrate your Readiness &amp; HRV.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowMorningDrawer(true)}
+                      className="rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-amber-400 transition"
+                    >
+                      Enter Sleep Now
+                    </button>
+                  </div>
+                )}
 
                 <h1 className="text-lg font-bold tracking-tight sm:text-xl">
                   {isTodayBlank
@@ -1783,6 +2286,128 @@ export default function FitnessDashboard({
                   </div>
                 )
               )}
+            </div>
+
+            {/* Daily Rhythm & Gentle Pending Indicators Row */}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowMorningDrawer(true)}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                  isSleepLogged
+                    ? "border-indigo-500/35 bg-indigo-500/10 text-indigo-400"
+                    : "border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25"
+                }`}
+              >
+                <Moon className="h-3 w-3" aria-hidden="true" />
+                <span>
+                  {isSleepLogged
+                    ? `Sleep: ${currentDay.sleep.totalHours}h (${currentDay.sleep.sleepQuality}/10) ✓`
+                    : currentDay.checkIn?.sleepSkipped
+                    ? "Sleep: Skipped · Tap to log"
+                    : "Sleep: Pending · Morning Check-In"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeTab !== "all" && activeTab !== "nutrition") {
+                    setActiveTab("nutrition");
+                  }
+                  setTimeout(() => {
+                    nutritionSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }, 60);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                  isNutritionLogged
+                    ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-400"
+                    : currentDay.checkIn?.nutritionSkipped
+                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                    : "border-amber-500/45 bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+                }`}
+              >
+                {isNutritionLogged ? (
+                  <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                ) : (
+                  <Bell className="h-3 w-3" aria-hidden="true" />
+                )}
+                <span>
+                  {isNutritionLogged
+                    ? `Nutrition: ${currentDay.nutrition.calories} kcal · ${currentDay.nutrition.protein}g P ✓`
+                    : currentDay.checkIn?.nutritionSkipped
+                    ? "Nutrition: Skipped · Tap to log"
+                    : "Nutrition: Not logged yet · Tap to add"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeTab !== "all" && activeTab !== "workout") {
+                    setActiveTab("workout");
+                  }
+                  setTimeout(() => {
+                    workoutSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }, 60);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                  isWorkoutLive
+                    ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
+                    : isWorkoutLogged
+                    ? "border-sky-500/35 bg-sky-500/10 text-sky-400"
+                    : currentDay.workout.skipped || currentDay.checkIn?.workoutSkipped
+                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                    : "border-sky-500/35 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20"
+                }`}
+              >
+                <Dumbbell className="h-3 w-3" aria-hidden="true" />
+                <span>
+                  {isWorkoutLive
+                    ? `Live Workout · ${Math.floor(liveElapsedSeconds / 60)}m ${String(liveElapsedSeconds % 60).padStart(2, "0")}s`
+                    : isWorkoutLogged
+                    ? `Workout: ${analysis.totalSets} sets${
+                        currentDay.workout.cardioMinutes > 0
+                          ? ` + ${currentDay.workout.cardioMinutes}m cardio`
+                          : ""
+                      }${
+                        currentDay.workout.workoutRating
+                          ? ` · ${currentDay.workout.workoutRating}/10`
+                          : ""
+                      } ✓`
+                    : currentDay.workout.skipped || currentDay.checkIn?.workoutSkipped
+                    ? "Workout: Rest / Skipped"
+                    : "Workout: Pending · Start or Quick Log"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeTab !== "all" && activeTab !== "nutrition" && activeTab !== "sleep") {
+                    setActiveTab("all");
+                  }
+                  setTimeout(() => {
+                    habitsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }, 60);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                  activeHabits.length > 0 && loggedHabitsCount >= activeHabits.length
+                    ? "border-teal-500/35 bg-teal-500/10 text-teal-400"
+                    : currentDay.checkIn?.habitsSkipped
+                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                    : "border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25"
+                }`}
+              >
+                <ListChecks className="h-3 w-3" aria-hidden="true" />
+                <span>
+                  {activeHabits.length > 0 && loggedHabitsCount >= activeHabits.length
+                    ? `Habits: ${loggedHabitsCount}/${activeHabits.length} ✓`
+                    : currentDay.checkIn?.habitsSkipped
+                    ? `Habits: Skipped (${loggedHabitsCount}/${activeHabits.length})`
+                    : `Habits Journal: ${loggedHabitsCount}/${activeHabits.length} pending`}
+                </span>
+              </button>
             </div>
 
             {/* Daily Master Note (Auto-Saved + Explicit Cloud Flush on Blur) */}
@@ -2604,6 +3229,7 @@ export default function FitnessDashboard({
            ========================================================= */}
         {(activeTab === "all" || activeTab === "workout") && (
           <section
+            ref={workoutSectionRef}
             aria-labelledby="heading-workouts"
             className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
           >
@@ -2620,7 +3246,7 @@ export default function FitnessDashboard({
                     1. Workouts
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Simple Exercise, Weight &amp; Reps logger ·{" "}
+                    WHOOP-style Live Timer, Routines &amp; Exercise logger ·{" "}
                     <strong className="text-[var(--text-primary)]">
                       {analysis.totalSets} sets
                     </strong>{" "}
@@ -2629,8 +3255,44 @@ export default function FitnessDashboard({
                 </div>
               </div>
 
-              {/* Weight Unit Toggle + Previous Session Carryover + Add Exercise */}
+              {/* Live Timer + Unit Toggle + Previous Session Carryover + Skip + Add Exercise */}
               <div className="flex flex-wrap items-center gap-2">
+                {isWorkoutLive ? (
+                  <button
+                    type="button"
+                    onClick={stopLiveWorkout}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-400 transition shadow-xs"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                    <span>
+                      Stop Workout ({Math.floor(liveElapsedSeconds / 60)}:
+                      {String(liveElapsedSeconds % 60).padStart(2, "0")})
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={startLiveWorkout}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+                  >
+                    <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                    <span>Start Workout</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={skipWorkoutToday}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                    currentDay.workout.skipped
+                      ? "border-sky-500/50 bg-sky-500/15 text-sky-400"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{currentDay.workout.skipped ? "Rest Day ✓" : "Skip / Rest"}</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() =>
@@ -2665,6 +3327,101 @@ export default function FitnessDashboard({
                   <span>Add Exercise</span>
                 </button>
               </div>
+            </div>
+
+            {workoutStatusBanner && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-xl border border-sky-500/35 bg-sky-500/10 px-3 py-2 text-xs text-sky-300 flex items-center justify-between gap-2"
+              >
+                <span>{workoutStatusBanner}</span>
+                <button
+                  type="button"
+                  onClick={() => setWorkoutStatusBanner("")}
+                  aria-label="Dismiss workout notice"
+                  className="text-sky-400 hover:text-sky-200"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+
+            {/* Saved Workout Routines (Tag & Auto-Fill Previous Weights/Reps) */}
+            <div className="rounded-xl border border-sky-500/25 bg-[var(--bg-elevated)] p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-sky-400" aria-hidden="true" />
+                  <span className="text-xs font-bold text-sky-400">
+                    Saved Workout Routines (Tag &amp; Auto-Fill Previous Weights)
+                  </span>
+                </div>
+                {currentDay.workout.exercises.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSaveRoutineForm((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-sky-500/35 bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/10 transition"
+                  >
+                    <Save className="h-3 w-3" aria-hidden="true" />
+                    <span>Save Current as Routine</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {effectiveRoutines.map((routine) => {
+                  const isTagged = currentDay.workout.routineId === routine.id;
+                  return (
+                    <button
+                      key={routine.id}
+                      type="button"
+                      onClick={() => applyWorkoutRoutine(routine)}
+                      className={`rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                        isTagged
+                          ? "border-sky-400 bg-sky-500/20 text-sky-300 font-bold"
+                          : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:border-sky-500/45"
+                      }`}
+                    >
+                      <div className="font-semibold">{routine.name}</div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        {routine.exercises.length} exercises · {routine.environment}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {showSaveRoutineForm && (
+                <form
+                  onSubmit={saveCurrentWorkoutAsRoutine}
+                  className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs"
+                >
+                  <input
+                    type="text"
+                    value={newRoutineName}
+                    onChange={(e) => setNewRoutineName(e.target.value)}
+                    placeholder="Routine name (e.g. Push Day Home)..."
+                    className="flex-1 min-w-[180px] rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-xs"
+                  />
+                  <select
+                    aria-label="Routine Environment"
+                    value={newRoutineEnv}
+                    onChange={(e) =>
+                      setNewRoutineEnv(e.target.value as "home" | "external")
+                    }
+                    className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-xs"
+                  >
+                    <option value="home">Home Gym</option>
+                    <option value="external">External Gym</option>
+                  </select>
+                  <button
+                    type="submit"
+                    className="rounded-md bg-sky-500 px-3 py-1 font-semibold text-slate-950 hover:bg-sky-400"
+                  >
+                    Save Routine
+                  </button>
+                </form>
+              )}
             </div>
 
             {/* Session Summary Inputs (Workout Split, Gym Time, Cardio) */}
@@ -2760,21 +3517,122 @@ export default function FitnessDashboard({
               </div>
             </div>
 
-            {/* Quick-Add Exercise Pills */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] font-medium text-[var(--text-muted)] mr-1">
-                Quick Add:
-              </span>
-              {QUICK_EXERCISE_PRESETS.map((preset) => (
-                <button
-                  key={preset.name}
-                  type="button"
-                  onClick={() => addExercise(preset.name, preset.group)}
-                  className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-[11px] hover:border-sky-500/50 hover:text-sky-400 transition"
-                >
-                  + {preset.name}
-                </button>
-              ))}
+            {/* Type-Aware Quick-Add Exercise Presets (Strength · Bodyweight · Cardio) */}
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                  Popular Exercise Presets by Type
+                </span>
+                <div className="flex flex-wrap gap-1">
+                  {(
+                    [
+                      { id: "all", label: "All" },
+                      { id: "strength", label: "Gym / Strength (Wt + Reps)" },
+                      { id: "bodyweight", label: "Bodyweight (Reps Only · 0 Wt)" },
+                      { id: "cardio", label: "Cardio (Duration Only)" },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setPresetTypeFilter(f.id)}
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
+                        presetTypeFilter === f.id
+                          ? "bg-sky-500 text-slate-950 font-semibold"
+                          : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {CATEGORIZED_EXERCISE_PRESETS.filter(
+                  (p) => presetTypeFilter === "all" || p.exerciseType === presetTypeFilter
+                ).map((preset) => (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => {
+                      if (preset.exerciseType === "cardio") {
+                        logQuickCardio(
+                          preset.name,
+                          preset.defaultDurationMinutes || quickCardioMins || 20
+                        );
+                      } else {
+                        addExercise(preset.name, preset.muscleGroup, {
+                          exerciseType: preset.exerciseType,
+                          defaultWeight: preset.defaultWeight,
+                          defaultReps: preset.defaultReps,
+                        });
+                      }
+                    }}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
+                      preset.exerciseType === "bodyweight"
+                        ? "border-teal-500/35 bg-teal-500/10 text-teal-300 hover:border-teal-400"
+                        : preset.exerciseType === "cardio"
+                        ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300 hover:border-emerald-400"
+                        : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-sky-500/50 hover:text-sky-400"
+                    }`}
+                  >
+                    + {preset.name}
+                    {preset.exerciseType === "bodyweight"
+                      ? " (BW)"
+                      : preset.exerciseType === "cardio"
+                      ? ` (${preset.defaultDurationMinutes}m)`
+                      : ""}
+                  </button>
+                ))}
+              </div>
+
+              {/* Quick Cardio Duration Bar */}
+              {(presetTypeFilter === "all" || presetTypeFilter === "cardio") && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2 text-xs">
+                  <span className="text-[11px] font-semibold text-emerald-400">
+                    Quick Cardio:
+                  </span>
+                  <input
+                    type="text"
+                    aria-label="Quick Cardio Activity"
+                    value={quickCardioType}
+                    onChange={(e) => setQuickCardioType(e.target.value)}
+                    className="w-36 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                  />
+                  {[10, 15, 20, 30, 45].map((mins) => (
+                    <button
+                      key={mins}
+                      type="button"
+                      onClick={() => {
+                        setQuickCardioMins(mins);
+                        logQuickCardio(quickCardioType, mins);
+                      }}
+                      className="rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
+                    >
+                      {mins}m
+                    </button>
+                  ))}
+                  <div className="flex items-center gap-1">
+                    <DecimalInput
+                      allowDecimal={false}
+                      min={1}
+                      max={300}
+                      aria-label="Quick Cardio Custom Minutes"
+                      value={quickCardioMins}
+                      onValueChange={(v) => setQuickCardioMins(Math.max(1, v))}
+                      className="w-12 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-1 text-center text-xs font-bold"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => logQuickCardio(quickCardioType, quickCardioMins)}
+                      className="rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-emerald-400"
+                    >
+                      Log Cardio
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Exercise Cards List */}
@@ -2811,6 +3669,13 @@ export default function FitnessDashboard({
                   selectedDate,
                   exercise.name
                 );
+                const isBodyweightEx =
+                  exercise.exerciseType === "bodyweight" ||
+                  (!exercise.exerciseType &&
+                    (exercise.name.toLowerCase().includes("push-up") ||
+                      exercise.name.toLowerCase().includes("pull-up") ||
+                      exercise.name.toLowerCase().includes("chin-up") ||
+                      exercise.name.toLowerCase().includes("bodyweight")));
                 return (
                 <div
                   key={exercise.id}
@@ -2831,6 +3696,11 @@ export default function FitnessDashboard({
                         placeholder="Type exercise name..."
                         className="w-full bg-transparent text-sm sm:text-base font-bold focus:outline-none border-b border-transparent focus:border-sky-500"
                       />
+                      {exercise.targetRepRange && (
+                        <span className="shrink-0 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-400">
+                          {exercise.targetRepRange} reps
+                        </span>
+                      )}
                       <input
                         type="text"
                         aria-label={`Exercise ${exIdx + 1} Muscle Group`}
@@ -2846,6 +3716,25 @@ export default function FitnessDashboard({
                     </div>
 
                     <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateExercise(exercise.id, {
+                            exerciseType: isBodyweightEx ? "strength" : "bodyweight",
+                            sets: isBodyweightEx
+                              ? exercise.sets
+                              : exercise.sets.map((s) => ({ ...s, weight: 0 })),
+                          })
+                        }
+                        title="Toggle between weighted gym exercise and zero-weight bodyweight exercise"
+                        className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                          isBodyweightEx
+                            ? "border-teal-500/40 bg-teal-500/15 text-teal-300"
+                            : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-teal-300"
+                        }`}
+                      >
+                        {isBodyweightEx ? "Bodyweight (0 Wt)" : "Weighted"}
+                      </button>
                       <button
                         type="button"
                         onClick={() => addSetToExercise(exercise.id)}
@@ -2869,12 +3758,16 @@ export default function FitnessDashboard({
                     <div className="text-[11px] text-sky-400/90">
                       Previous ({prevSetsForEx.sourceDate}):{" "}
                       {prevSetsForEx.sets
-                        .map((ps) => `${ps.weight}${profile.weightUnit}×${ps.reps}`)
+                        .map((ps) =>
+                          isBodyweightEx
+                            ? `${ps.reps} reps (BW)`
+                            : `${ps.weight}${profile.weightUnit}×${ps.reps}`
+                        )
                         .join(" · ")}
                     </div>
                   )}
 
-                  {/* Crisp Mobile-First Set Grid (Set | Weight | Reps | Done) with zero wasted horizontal gaps */}
+                  {/* Crisp Mobile-First Set Grid (Set | Weight | Reps | Done) */}
                   <div
                     role="region"
                     aria-label={`${exercise.name || `Exercise ${exIdx + 1}`} sets`}
@@ -2882,7 +3775,7 @@ export default function FitnessDashboard({
                   >
                     <div className="grid grid-cols-[2.25rem_5.5rem_4.5rem_1fr] items-center gap-2 border-b border-[var(--border-subtle)] pb-1 text-[11px] font-medium text-[var(--text-muted)]">
                       <span>Set</span>
-                      <span>Weight ({profile.weightUnit})</span>
+                      <span>{isBodyweightEx ? "Weight" : `Weight (${profile.weightUnit})`}</span>
                       <span>Reps</span>
                       <span className="text-left">Done</span>
                     </div>
@@ -2897,19 +3790,25 @@ export default function FitnessDashboard({
                           <span className="font-semibold text-[var(--text-muted)] tabular-nums">
                             #{sIdx + 1}
                           </span>
-                          <DecimalInput
-                            allowDecimal
-                            min={0}
-                            aria-label={`Set ${sIdx + 1} Weight`}
-                            value={s.weight}
-                            onValueChange={(val) =>
-                              updateExerciseSet(exercise.id, s.id, {
-                                weight: val,
-                              })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
-                          />
+                          {isBodyweightEx ? (
+                            <span className="w-full rounded-md border border-teal-500/30 bg-teal-500/10 px-2 py-1.5 text-center text-[11px] font-bold text-teal-300">
+                              0 (BW)
+                            </span>
+                          ) : (
+                            <DecimalInput
+                              allowDecimal
+                              min={0}
+                              aria-label={`Set ${sIdx + 1} Weight`}
+                              value={s.weight}
+                              onValueChange={(val) =>
+                                updateExerciseSet(exercise.id, s.id, {
+                                  weight: val,
+                                })
+                              }
+                              onBlur={() => void flushSaveNow()}
+                              className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
+                            />
+                          )}
                           <DecimalInput
                             allowDecimal={false}
                             min={0}
@@ -2972,6 +3871,76 @@ export default function FitnessDashboard({
               })}
             </div>
 
+            {/* Post-Workout 1–10 Rating & Auto-Calculated Workout Summary */}
+            {(isWorkoutLogged || Boolean(currentDay.workout.endedAt)) && (
+              <div className="rounded-xl border border-sky-500/35 bg-sky-500/5 p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Star className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                    <div>
+                      <div className="text-xs font-bold">
+                        Rate Today&apos;s Workout Effort (1–10)
+                      </div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Stored on this workout &amp; day; directly calibrates Workout Intensity &amp; Strain.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((r) => {
+                      const activeRating =
+                        currentDay.workout.workoutRating ??
+                        currentDay.dailyWorkoutRating;
+                      return (
+                        <button
+                          key={r}
+                          type="button"
+                          aria-label={`Rate workout ${r} out of 10`}
+                          aria-pressed={activeRating === r}
+                          onClick={() => setWorkoutRating(r)}
+                          className={`min-w-[28px] rounded-md px-2 py-1 text-xs font-bold transition ${
+                            activeRating === r
+                              ? "bg-amber-500 text-slate-950"
+                              : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-amber-400/50"
+                          }`}
+                        >
+                          {r}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Auto-Calculated Workout Summary Strip */}
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-center text-xs">
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">Total Duration</div>
+                    <div className="font-extrabold text-sky-400 tabular-nums">
+                      {currentDay.workout.gymDurationMinutes + currentDay.workout.cardioMinutes} min
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">Total Volume</div>
+                    <div className="font-extrabold tabular-nums">
+                      {analysis.totalVolume.toLocaleString()} {profile.weightUnit}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">Workout Intensity</div>
+                    <div className="font-extrabold text-amber-400 tabular-nums">
+                      {analysis.workoutIntensityScore}% · {analysis.effectiveWorkoutRating}/10
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">Workout Strain</div>
+                    <div className="font-extrabold text-emerald-400 tabular-nums">
+                      {analysis.strainScore} / 21
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Overall Workout Session Note */}
             <div className="space-y-1">
               <div className="flex items-center justify-between">
@@ -3007,6 +3976,7 @@ export default function FitnessDashboard({
            ========================================================= */}
         {(activeTab === "all" || activeTab === "nutrition") && (
           <section
+            ref={nutritionSectionRef}
             aria-labelledby="heading-nutrition"
             className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
           >
@@ -3023,28 +3993,192 @@ export default function FitnessDashboard({
                     2. Nutrition
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Open Global (USDA) &amp; Indian (ICMR-NIN) food search with portion weights — auto-sums Calories, Macros, Hydration &amp; Fiber
+                    Choose Quick Totals (Calories + Protein) or Log 3–4 Foods Consumed — auto-sums Macros, Hydration &amp; Fiber
                   </p>
                 </div>
               </div>
 
-              <label className="inline-flex items-center gap-2 text-xs text-[var(--text-muted)] cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={currentDay.nutrition.useMealSum}
-                  onChange={(e) =>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
                     updateCurrentDay((d) => ({
                       ...d,
-                      nutrition: {
-                        ...d.nutrition,
-                        useMealSum: e.target.checked,
-                      },
+                      checkIn: { ...d.checkIn, nutritionSkipped: true },
                     }))
                   }
-                  className="h-4 w-4 rounded accent-emerald-500"
-                />
-                <span>Auto-sum totals from meal rows</span>
-              </label>
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                    currentDay.checkIn?.nutritionSkipped && !isNutritionLogged
+                      ? "border-amber-500/45 bg-amber-500/15 text-amber-400"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>
+                    {currentDay.checkIn?.nutritionSkipped && !isNutritionLogged
+                      ? "Skipped for Now ✓"
+                      : "Skip Nutrition"}
+                  </span>
+                </button>
+
+                <label className="inline-flex items-center gap-2 text-xs text-[var(--text-muted)] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={currentDay.nutrition.useMealSum}
+                    onChange={(e) =>
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        nutrition: {
+                          ...d.nutrition,
+                          useMealSum: e.target.checked,
+                        },
+                      }))
+                    }
+                    className="h-4 w-4 rounded accent-emerald-500"
+                  />
+                  <span>Auto-sum totals from meal rows</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Dual-Mode Quick Entry Toggle (Quick Totals vs. Log 3-4 Foods) */}
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-amber-400">
+                  Quick Nutrition Mode
+                </span>
+                <div
+                  role="group"
+                  aria-label="Nutrition Entry Mode"
+                  className="inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-0.5 text-xs"
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        nutrition: { ...d.nutrition, useMealSum: false },
+                        checkIn: { ...d.checkIn, nutritionSkipped: false },
+                      }))
+                    }
+                    className={`rounded-md px-2.5 py-1 font-semibold transition ${
+                      !currentDay.nutrition.useMealSum
+                        ? "bg-amber-500 text-slate-950"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    Quick Totals (kcal + Protein)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        nutrition: { ...d.nutrition, useMealSum: true },
+                        checkIn: { ...d.checkIn, nutritionSkipped: false },
+                      }))
+                    }
+                    className={`rounded-md px-2.5 py-1 font-semibold transition ${
+                      currentDay.nutrition.useMealSum
+                        ? "bg-emerald-500 text-slate-950"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    Log 3–4 Foods Consumed
+                  </button>
+                </div>
+              </div>
+
+              {!currentDay.nutrition.useMealSum ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-[11px] text-[var(--text-muted)]">
+                    Quick add directly to daily totals:
+                  </span>
+                  {[250, 500].map((kcal) => (
+                    <button
+                      key={kcal}
+                      type="button"
+                      onClick={() =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          nutrition: {
+                            ...d.nutrition,
+                            useMealSum: false,
+                            calories: d.nutrition.calories + kcal,
+                          },
+                          checkIn: { ...d.checkIn, nutritionSkipped: false },
+                        }))
+                      }
+                      className="rounded-md border border-amber-500/35 bg-[var(--bg-surface)] px-2 py-1 font-semibold text-amber-400 hover:bg-amber-500/15"
+                    >
+                      +{kcal} kcal
+                    </button>
+                  ))}
+                  {[25, 40].map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          nutrition: {
+                            ...d.nutrition,
+                            useMealSum: false,
+                            protein: d.nutrition.protein + p,
+                          },
+                          checkIn: { ...d.checkIn, nutritionSkipped: false },
+                        }))
+                      }
+                      className="rounded-md border border-emerald-500/35 bg-[var(--bg-surface)] px-2 py-1 font-semibold text-emerald-400 hover:bg-emerald-500/15"
+                    >
+                      +{p}g Protein
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <form
+                  onSubmit={addQuickCustomFood}
+                  className="flex flex-wrap items-center gap-2 text-xs"
+                >
+                  <input
+                    type="text"
+                    aria-label="Quick food name"
+                    value={quickFoodName}
+                    onChange={(e) => setQuickFoodName(e.target.value)}
+                    placeholder="Food consumed (e.g. 3 Eggs + Toast, Chicken Bowl)..."
+                    className="flex-1 min-w-[200px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs focus:border-emerald-500 focus:outline-none"
+                  />
+                  <label className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1">
+                    <span className="text-[10px] text-amber-400">kcal</span>
+                    <DecimalInput
+                      allowDecimal={false}
+                      min={0}
+                      aria-label="Quick food calories"
+                      value={quickFoodCalories}
+                      onValueChange={(v) => setQuickFoodCalories(Math.round(v))}
+                      className="w-14 bg-transparent text-right font-bold focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1">
+                    <span className="text-[10px] text-emerald-400">P(g)</span>
+                    <DecimalInput
+                      allowDecimal={false}
+                      min={0}
+                      aria-label="Quick food protein"
+                      value={quickFoodProtein}
+                      onValueChange={(v) => setQuickFoodProtein(Math.round(v))}
+                      className="w-12 bg-transparent text-right font-bold focus:outline-none"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Add Food ({currentDay.nutrition.meals.length})</span>
+                  </button>
+                </form>
+              )}
             </div>
 
             {/* 2-Tier Visual Hierarchy: Primary (Calories + Protein) -> Secondary (Carbs, Fats, Hydration, Fiber) */}
@@ -3978,6 +5112,197 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
+            WHOOP-STYLE DAILY HABITS & SUPPLEMENTS JOURNAL (100+ Catalog)
+           ========================================================= */}
+        {(activeTab === "all" || activeTab === "nutrition" || activeTab === "sleep") && (
+          <section
+            ref={habitsSectionRef}
+            aria-labelledby="heading-habits-journal"
+            className="rounded-2xl border border-purple-500/30 bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-purple-500/15 text-purple-400">
+                  <ListChecks className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2
+                    id="heading-habits-journal"
+                    className="text-base font-bold sm:text-lg"
+                  >
+                    Daily Habits &amp; Supplements Journal
+                  </h2>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    WHOOP-style customizable tracker ({loggedHabitsCount}/{activeHabits.length} logged for {selectedDate} · leave any blank or skip)
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateCurrentDay((d) => ({
+                      ...d,
+                      checkIn: { ...d.checkIn, habitsSkipped: true },
+                    }))
+                  }
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                    currentDay.checkIn?.habitsSkipped
+                      ? "border-purple-500/50 bg-purple-500/15 text-purple-300"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>
+                    {currentDay.checkIn?.habitsSkipped ? "Skipped Today ✓" : "Skip Habits"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowHabitCatalogDialog(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-purple-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-purple-400 transition"
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Choose Habits ({HABIT_CATALOG.length}+ Catalog)</span>
+                </button>
+              </div>
+            </div>
+
+            {activeHabits.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-center space-y-2 text-xs">
+                <div className="font-semibold">No active habits selected</div>
+                <p className="text-[var(--text-muted)]">
+                  Pick your daily supplements and recovery habits from our {HABIT_CATALOG.length}-habit catalog.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowHabitCatalogDialog(true)}
+                  className="inline-flex items-center gap-1 rounded-lg bg-purple-500 px-3 py-1.5 font-semibold text-slate-950"
+                >
+                  Browse {HABIT_CATALOG.length} Habits
+                </button>
+              </div>
+            ) : (
+              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                {activeHabits.map((habit) => {
+                  const log = currentDay.habitLogs?.[habit.id];
+                  const isYes = log?.status === "yes";
+                  const isNo = log?.status === "no";
+                  const val = log?.value ?? "";
+                  return (
+                    <div
+                      key={habit.id}
+                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold truncate">
+                            {habit.name}
+                          </div>
+                          <div className="text-[10px] text-[var(--text-muted)]">
+                            {habit.category}
+                          </div>
+                        </div>
+                        {(isYes || isNo || val.trim().length > 0) && (
+                          <button
+                            type="button"
+                            onClick={() => updateHabitEntry(habit.id, null)}
+                            className="text-[10px] text-[var(--text-muted)] hover:text-rose-400"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+
+                      {habit.inputType === "yes_no" ? (
+                        <div className="grid grid-cols-3 gap-1 text-[11px]">
+                          <button
+                            type="button"
+                            aria-pressed={isYes}
+                            onClick={() =>
+                              updateHabitEntry(habit.id, { status: "yes" })
+                            }
+                            className={`rounded-lg py-1.5 font-semibold transition ${
+                              isYes
+                                ? "bg-emerald-500 text-slate-950"
+                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-emerald-500/40"
+                            }`}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={isNo}
+                            onClick={() =>
+                              updateHabitEntry(habit.id, { status: "no" })
+                            }
+                            className={`rounded-lg py-1.5 font-semibold transition ${
+                              isNo
+                                ? "bg-rose-500 text-white"
+                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-rose-500/40"
+                            }`}
+                          >
+                            No
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={!isYes && !isNo}
+                            onClick={() => updateHabitEntry(habit.id, null)}
+                            className={`rounded-lg py-1.5 font-medium transition ${
+                              !isYes && !isNo
+                                ? "border border-purple-500/40 bg-purple-500/10 text-purple-300"
+                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                            }`}
+                          >
+                            Blank
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            aria-label={`${habit.name} dosage`}
+                            placeholder={habit.defaultValue || "0"}
+                            value={val}
+                            onChange={(e) =>
+                              updateHabitEntry(habit.id, {
+                                value: e.target.value,
+                                unit: habit.unit,
+                              })
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs font-bold text-emerald-400 focus:border-purple-400 focus:outline-none"
+                          />
+                          <span className="text-xs text-[var(--text-muted)]">
+                            {habit.unit || "units"}
+                          </span>
+                          {habit.defaultValue && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateHabitEntry(habit.id, {
+                                  value: habit.defaultValue,
+                                  unit: habit.unit,
+                                })
+                              }
+                              className="ml-auto rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
+                            >
+                              {habit.defaultValue} {habit.unit}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* =========================================================
             MODULE 3: SLEEP & RECOVERY SUFFICIENCY
            ========================================================= */}
         {(activeTab === "all" || activeTab === "sleep") && (
@@ -4505,6 +5830,569 @@ export default function FitnessDashboard({
           </section>
         )}
       </main>
+
+      {/* =========================================================
+          CONVERSATIONAL SLIDE-OVER MORNING CHECK-IN DRAWER (Sleep + Optional Body Metrics)
+         ========================================================= */}
+      <dialog
+        ref={morningDrawerRef}
+        aria-labelledby="morning-checkin-title"
+        onCancel={(e) => {
+          e.preventDefault();
+          setShowMorningDrawer(false);
+        }}
+        onClose={() => setShowMorningDrawer(false)}
+        onClick={(e) => {
+          const dlg = morningDrawerRef.current;
+          if (!dlg) return;
+          const rect = dlg.getBoundingClientRect();
+          if (
+            e.clientX < rect.left ||
+            e.clientX > rect.right ||
+            e.clientY < rect.top ||
+            e.clientY > rect.bottom
+          ) {
+            setShowMorningDrawer(false);
+          }
+        }}
+        className="morning-drawer-dialog shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-5 py-4 bg-[var(--bg-elevated)]/70">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
+              <Moon className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <h2 id="morning-checkin-title" className="text-base font-bold">
+                Morning Check-In · {selectedDate}
+              </h2>
+              <p className="text-xs text-[var(--text-muted)]">
+                Quick check-in: enter last night&apos;s sleep to finish for the morning.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowMorningDrawer(false)}
+            aria-label="Close Morning Check-In Drawer"
+            className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {/* Primary Check-In: Sleep (2 Inputs Only) */}
+          <div className="rounded-2xl border border-indigo-500/35 bg-indigo-500/5 p-4 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
+                1. How did you sleep? (Primary · 2 Inputs)
+              </span>
+              <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
+                Completes Check-In
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              <label
+                htmlFor="drawer-sleep-hours"
+                className="block text-xs font-semibold text-[var(--text-primary)]"
+              >
+                Total Sleep Duration (hours)
+              </label>
+              <div className="flex items-baseline gap-2">
+                <DecimalInput
+                  id="drawer-sleep-hours"
+                  autoFocus
+                  allowDecimal
+                  min={0}
+                  max={23}
+                  value={currentDay.sleep.totalHours}
+                  onValueChange={(nextHours) =>
+                    updateSleepWith70kgIndianBaseline(
+                      nextHours,
+                      currentDay.sleep.sleepQuality
+                    )
+                  }
+                  className="w-24 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 text-2xl font-extrabold tabular-nums text-indigo-400 focus:border-indigo-400 focus:outline-none"
+                />
+                <span className="text-xs text-[var(--text-muted)]">hours</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9].map((hrs) => (
+                  <button
+                    key={hrs}
+                    type="button"
+                    aria-pressed={currentDay.sleep.totalHours === hrs}
+                    onClick={() =>
+                      updateSleepWith70kgIndianBaseline(
+                        hrs,
+                        currentDay.sleep.sleepQuality
+                      )
+                    }
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold transition ${
+                      currentDay.sleep.totalHours === hrs
+                        ? "bg-indigo-500 text-slate-950"
+                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-indigo-400/50"
+                    }`}
+                  >
+                    {hrs}h
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="drawer-sleep-quality"
+                  className="text-xs font-semibold text-[var(--text-primary)]"
+                >
+                  Sleep Score / Quality Rating (1–10)
+                </label>
+                <span className="text-xs font-bold text-amber-400">
+                  {currentDay.sleep.sleepQuality} / 10
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    aria-label={`Drawer sleep quality ${q} out of 10`}
+                    aria-pressed={currentDay.sleep.sleepQuality === q}
+                    onClick={() =>
+                      updateSleepWith70kgIndianBaseline(
+                        currentDay.sleep.totalHours,
+                        q
+                      )
+                    }
+                    className={`min-w-[30px] rounded-lg px-2 py-1.5 text-xs font-bold transition ${
+                      currentDay.sleep.sleepQuality === q
+                        ? "bg-amber-500 text-slate-950"
+                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-amber-400/50"
+                    }`}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Live Auto-Derived Biometrics Preview */}
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs space-y-1.5">
+              <div className="text-[11px] font-semibold text-indigo-400">
+                Auto-Calculated Sleep Architecture &amp; Recovery Metrics
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
+                  <div className="text-[10px] text-[var(--text-muted)]">Deep</div>
+                  <div className="font-bold text-emerald-400">
+                    {currentDay.sleep.deepSleepHours}h
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
+                  <div className="text-[10px] text-[var(--text-muted)]">REM</div>
+                  <div className="font-bold text-sky-400">
+                    {currentDay.sleep.remSleepHours}h
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
+                  <div className="text-[10px] text-[var(--text-muted)]">RHR / HRV</div>
+                  <div className="font-bold text-teal-400">
+                    {currentDay.sleep.restingHeartRate || "--"} / {currentDay.sleep.hrvMs || "--"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Secondary Check-In: Optional Body Composition (Weight & Body Fat %) */}
+          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                2. Body Parameters (Optional)
+              </span>
+              <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
+                Skip if unchanged today
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 space-y-1">
+                <label
+                  htmlFor="drawer-body-weight"
+                  className="block text-[11px] font-medium text-[var(--text-muted)]"
+                >
+                  Body Weight ({profile.weightUnit})
+                </label>
+                <div className="flex items-baseline gap-1">
+                  <DecimalInput
+                    id="drawer-body-weight"
+                    allowDecimal
+                    min={0}
+                    max={400}
+                    value={currentDay.bodyMetrics?.weight ?? 0}
+                    onValueChange={(val) => {
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        bodyMetrics: {
+                          ...d.bodyMetrics,
+                          weight: val > 0 ? val : undefined,
+                          updatedAt: new Date().toISOString(),
+                        },
+                      }));
+                      if (val > 0) {
+                        updateProfileMeta((p) => ({ ...p, bodyweight: val }));
+                      }
+                    }}
+                    className="w-20 bg-transparent text-lg font-extrabold text-emerald-400 focus:outline-none"
+                  />
+                  <span className="text-xs text-[var(--text-muted)]">
+                    {profile.weightUnit}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateCurrentDay((d) => ({
+                      ...d,
+                      bodyMetrics: {
+                        ...d.bodyMetrics,
+                        weight: profile.bodyweight,
+                        updatedAt: new Date().toISOString(),
+                      },
+                    }))
+                  }
+                  className="text-[10px] font-medium text-emerald-400 hover:underline"
+                >
+                  Use {profile.bodyweight} {profile.weightUnit}
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 space-y-1">
+                <label
+                  htmlFor="drawer-body-fat"
+                  className="block text-[11px] font-medium text-[var(--text-muted)]"
+                >
+                  Body Fat %
+                </label>
+                <div className="flex items-baseline gap-1">
+                  <DecimalInput
+                    id="drawer-body-fat"
+                    allowDecimal
+                    min={0}
+                    max={60}
+                    value={currentDay.bodyMetrics?.bodyFatPct ?? 0}
+                    onValueChange={(val) => {
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        bodyMetrics: {
+                          ...d.bodyMetrics,
+                          bodyFatPct: val > 0 ? val : undefined,
+                          updatedAt: new Date().toISOString(),
+                        },
+                      }));
+                      if (val > 0) {
+                        updateProfileMeta((p) => ({ ...p, bodyFatPct: val }));
+                      }
+                    }}
+                    className="w-20 bg-transparent text-lg font-extrabold text-sky-400 focus:outline-none"
+                  />
+                  <span className="text-xs text-[var(--text-muted)]">%</span>
+                </div>
+                {profile.bodyFatPct ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        bodyMetrics: {
+                          ...d.bodyMetrics,
+                          bodyFatPct: profile.bodyFatPct,
+                          updatedAt: new Date().toISOString(),
+                        },
+                      }))
+                    }
+                    className="text-[10px] font-medium text-sky-400 hover:underline"
+                  >
+                    Use {profile.bodyFatPct}%
+                  </button>
+                ) : (
+                  <span className="block text-[10px] text-[var(--text-muted)]">
+                    Every few days
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+            Nutrition, workouts, and evening habits can all be logged anytime later in the day. Completing sleep here finishes your Morning Check-In.
+          </p>
+        </div>
+
+        <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-4 flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              updateCurrentDay((d) => ({
+                ...d,
+                checkIn: { ...d.checkIn, sleepSkipped: true },
+              }));
+              setShowMorningDrawer(false);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+          >
+            <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Skip Sleep for Now</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (currentDay.sleep.totalHours <= 0) {
+                document.getElementById("drawer-sleep-hours")?.focus();
+                return;
+              }
+              updateCurrentDay((d) => ({
+                ...d,
+                checkIn: {
+                  ...d.checkIn,
+                  sleepSkipped: false,
+                  morningCompletedAt: new Date().toISOString(),
+                },
+              }));
+              setShowMorningDrawer(false);
+              void flushSaveNow();
+            }}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+          >
+            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+            <span>Complete Check-In</span>
+          </button>
+        </div>
+      </dialog>
+
+      {/* =========================================================
+          WHOOP-STYLE 100-HABIT CATALOG & CUSTOM TRACKER PICKER DIALOG
+         ========================================================= */}
+      <dialog
+        ref={habitCatalogDialogRef}
+        aria-labelledby="habit-catalog-title"
+        onCancel={(e) => {
+          e.preventDefault();
+          setShowHabitCatalogDialog(false);
+        }}
+        onClose={() => setShowHabitCatalogDialog(false)}
+        onClick={(e) => {
+          const dlg = habitCatalogDialogRef.current;
+          if (!dlg) return;
+          const rect = dlg.getBoundingClientRect();
+          if (
+            e.clientX < rect.left ||
+            e.clientX > rect.right ||
+            e.clientY < rect.top ||
+            e.clientY > rect.bottom
+          ) {
+            setShowHabitCatalogDialog(false);
+          }
+        }}
+        className="habit-catalog-dialog shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-5 py-4 bg-[var(--bg-elevated)]/70">
+          <div>
+            <h2 id="habit-catalog-title" className="text-base font-bold">
+              Customize Daily Habits Journal ({allHabitDefinitions.length} Available)
+            </h2>
+            <p className="text-xs text-[var(--text-muted)]">
+              Select which habits appear in your daily checklist ({activeHabits.length} currently active).
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowHabitCatalogDialog(false)}
+            aria-label="Close Habits Catalog"
+            className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="p-4 border-b border-[var(--border-subtle)] space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-1 min-w-[200px] items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5">
+              <Search className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="Search 100 habits catalog"
+                value={habitSearchQuery}
+                onChange={(e) => setHabitSearchQuery(e.target.value)}
+                placeholder="Search creatine, magnesium, sauna, steps, alcohol..."
+                className="w-full bg-transparent text-xs focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                "All",
+                "Supplements",
+                "Sleep Hygiene",
+                "Recovery",
+                "Nutrition",
+                "Lifestyle",
+              ] as const
+            ).map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setHabitCategoryFilter(cat)}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition ${
+                  habitCategoryFilter === cat
+                    ? "bg-purple-500 text-slate-950"
+                    : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          {/* Add Custom Habit Inline Form */}
+          <form
+            onSubmit={handleAddCustomHabit}
+            className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs"
+          >
+            <input
+              type="text"
+              value={customHabitName}
+              onChange={(e) => setCustomHabitName(e.target.value)}
+              placeholder="Add custom habit (e.g. Fish Oil, Sunlight)..."
+              className="flex-1 min-w-[160px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
+            />
+            <select
+              aria-label="Custom Habit Category"
+              value={customHabitCategory}
+              onChange={(e) =>
+                setCustomHabitCategory(e.target.value as HabitCategory)
+              }
+              className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+            >
+              <option value="Supplements">Supplements</option>
+              <option value="Sleep Hygiene">Sleep Hygiene</option>
+              <option value="Recovery">Recovery</option>
+              <option value="Nutrition">Nutrition</option>
+              <option value="Lifestyle">Lifestyle</option>
+            </select>
+            <select
+              aria-label="Custom Habit Input Type"
+              value={customHabitType}
+              onChange={(e) =>
+                setCustomHabitType(e.target.value as "yes_no" | "dosage")
+              }
+              className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+            >
+              <option value="yes_no">Yes / No</option>
+              <option value="dosage">Dosage / Units</option>
+            </select>
+            {customHabitType === "dosage" && (
+              <>
+                <input
+                  type="text"
+                  aria-label="Custom Habit Unit"
+                  value={customHabitUnit}
+                  onChange={(e) => setCustomHabitUnit(e.target.value)}
+                  placeholder="unit (g/mg)"
+                  className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                />
+                <input
+                  type="text"
+                  aria-label="Custom Habit Default Amount"
+                  value={customHabitDefault}
+                  onChange={(e) => setCustomHabitDefault(e.target.value)}
+                  placeholder="default"
+                  className="w-16 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                />
+              </>
+            )}
+            <button
+              type="submit"
+              className="inline-flex items-center gap-1 rounded-lg bg-purple-500 px-3 py-1 font-semibold text-slate-950 hover:bg-purple-400 transition"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Add Custom</span>
+            </button>
+          </form>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 grid gap-2 sm:grid-cols-2">
+          {allHabitDefinitions
+            .filter((h) => {
+              if (
+                habitCategoryFilter !== "All" &&
+                h.category !== habitCategoryFilter
+              ) {
+                return false;
+              }
+              if (!habitSearchQuery.trim()) return true;
+              const q = habitSearchQuery.trim().toLowerCase();
+              return (
+                h.name.toLowerCase().includes(q) ||
+                h.category.toLowerCase().includes(q)
+              );
+            })
+            .map((habit) => {
+              const activeIds =
+                profile.activeHabitIds && profile.activeHabitIds.length > 0
+                  ? profile.activeHabitIds
+                  : DEFAULT_ACTIVE_HABIT_IDS;
+              const isSelected = activeIds.includes(habit.id);
+              return (
+                <button
+                  key={habit.id}
+                  type="button"
+                  onClick={() => toggleActiveHabit(habit.id)}
+                  className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 text-left text-xs transition ${
+                    isSelected
+                      ? "border-purple-500/50 bg-purple-500/10"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-purple-500/35"
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{habit.name}</div>
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      {habit.category} ·{" "}
+                      {habit.inputType === "yes_no"
+                        ? "Yes / No"
+                        : `Dosage (${habit.defaultValue || "1"} ${habit.unit || "units"})`}
+                    </div>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                      isSelected
+                        ? "bg-purple-500 text-slate-950"
+                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {isSelected ? "Active ✓" : "+ Track"}
+                  </span>
+                </button>
+              );
+            })}
+        </div>
+
+        <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 px-5 py-3 flex justify-end">
+          <button
+            type="button"
+            onClick={() => setShowHabitCatalogDialog(false)}
+            className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+          >
+            Done ({activeHabits.length} Active Habits)
+          </button>
+        </div>
+      </dialog>
     </div>
   );
 }

@@ -1,3 +1,5 @@
+export type ExerciseType = "strength" | "bodyweight" | "cardio";
+
 export interface ExerciseSet {
   id: string;
   weight: number;
@@ -10,14 +12,40 @@ export interface WorkoutExercise {
   id: string;
   name: string;
   muscleGroup: string;
+  exerciseType?: ExerciseType;
+  targetRepRange?: string;
   sets: ExerciseSet[];
   note: string;
+}
+
+export interface WorkoutRoutineExerciseTemplate {
+  id: string;
+  name: string;
+  muscleGroup: string;
+  exerciseType: ExerciseType;
+  defaultSets: number;
+  repRange: string;
+  baselineWeight: number;
+  baselineReps: number;
+}
+
+export interface WorkoutRoutineTemplate {
+  id: string;
+  name: string;
+  environment: "home" | "external" | "custom";
+  focus: string;
+  exercises: WorkoutRoutineExerciseTemplate[];
 }
 
 export interface WorkoutSession {
   gymDurationMinutes: number;
   sessionTitle: string;
   sessionRpe: number; // 1-10
+  routineId?: string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  workoutRating?: number; // 1-10 post-workout user rating
+  skipped?: boolean;
   exercises: WorkoutExercise[];
   cardioMinutes: number;
   cardioType: string;
@@ -122,9 +150,53 @@ export interface DailyAiCoachState {
   prescription?: AiRecoveryPrescription | null;
 }
 
+export type HabitInputType = "yes_no" | "dosage";
+
+export type HabitCategory =
+  | "Supplements"
+  | "Sleep Hygiene"
+  | "Recovery"
+  | "Nutrition"
+  | "Lifestyle";
+
+export interface HabitDefinition {
+  id: string;
+  name: string;
+  category: HabitCategory;
+  inputType: HabitInputType;
+  unit?: string;
+  defaultValue?: string;
+}
+
+export interface DailyHabitEntry {
+  status?: "yes" | "no" | "blank";
+  value?: string;
+  unit?: string;
+  updatedAt?: string;
+}
+
+export interface DailyBodyMetrics {
+  weight?: number;
+  bodyFatPct?: number;
+  updatedAt?: string;
+  skipped?: boolean;
+}
+
+export interface DailyCheckInStatus {
+  sleepSkipped?: boolean;
+  nutritionSkipped?: boolean;
+  workoutSkipped?: boolean;
+  habitsSkipped?: boolean;
+  morningCompletedAt?: string;
+}
+
 export interface DailyEntry {
   date: string; // YYYY-MM-DD
   dailyNote: string;
+  dailyWorkoutRating?: number;
+  bodyMetrics?: DailyBodyMetrics;
+  habitLogs?: Record<string, DailyHabitEntry>;
+  checkIn?: DailyCheckInStatus;
   workout: WorkoutSession;
   nutrition: NutritionLog;
   sleep: SleepLog;
@@ -151,8 +223,12 @@ export interface UserProfileStore {
   displayName: string;
   weightUnit: "kg" | "lbs";
   bodyweight: number;
+  bodyFatPct?: number;
   baselineSleepNeedHours: number;
   pinnedStaples?: PinnedFoodStaple[];
+  workoutRoutines?: WorkoutRoutineTemplate[];
+  activeHabitIds?: string[];
+  customHabitDefinitions?: HabitDefinition[];
   days: Record<string, DailyEntry>;
   updatedAt: string;
 }
@@ -160,6 +236,8 @@ export interface UserProfileStore {
 export interface SufficiencyAnalysis {
   readinessScore: number; // 0-100
   strainScore: number; // 0-21 (WHOOP scale)
+  workoutIntensityScore: number; // 0-100
+  effectiveWorkoutRating: number; // 1-10
   totalVolume: number;
   totalSets: number;
   totalReps: number;
@@ -360,7 +438,16 @@ export function calculateSufficiencyAnalysis(
   const totalActiveMinutes =
     (Number(workout.gymDurationMinutes) || 0) +
     (Number(workout.cardioMinutes) || 0);
-  const rpeFactor = Math.max(1, Math.min(10, Number(workout.sessionRpe) || 6));
+  const effectiveWorkoutRating = Math.max(
+    1,
+    Math.min(
+      10,
+      Number(
+        workout.workoutRating ?? entry.dailyWorkoutRating ?? workout.sessionRpe
+      ) || 6
+    )
+  );
+  const rpeFactor = effectiveWorkoutRating;
 
   // Strain on 0-21 scale
   const durationStrain = Math.min(12, (totalActiveMinutes / 60) * 6.5);
@@ -371,6 +458,20 @@ export function calculateSufficiencyAnalysis(
       ? 2.0
       : Math.min(20.8, Math.max(2.0, durationStrain + volumeStrain + intensityStrain));
   const strainScore = Number(rawStrain.toFixed(1));
+  const workoutIntensityScore =
+    totalActiveMinutes === 0 && totalSets === 0
+      ? 0
+      : Math.min(
+          100,
+          Math.max(
+            15,
+            Math.round(
+              effectiveWorkoutRating * 7 +
+                Math.min(20, totalSets * 1.1) +
+                Math.min(10, totalActiveMinutes / 6)
+            )
+          )
+        );
 
   // 2. Strain-Adjusted Sleep Need (WHOOP / Oura clinical formula)
   // Base sleep need + extra sleep required for gym strain & CNS load
@@ -498,6 +599,8 @@ export function calculateSufficiencyAnalysis(
   return {
     readinessScore,
     strainScore,
+    workoutIntensityScore,
+    effectiveWorkoutRating,
     totalVolume,
     totalSets,
     totalReps,

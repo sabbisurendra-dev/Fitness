@@ -4,6 +4,7 @@ import {
   PinnedFoodStaple,
   UserProfileStore,
   WorkoutExercise,
+  WorkoutRoutineTemplate,
   calculateSufficiencyAnalysis,
 } from "./types";
 
@@ -110,7 +111,22 @@ export function isDailyEntryLogged(entry: DailyEntry | undefined): boolean {
     entry.sleep.hrvMs > 0 ||
     Boolean(entry.sleep.note.trim());
   const hasDailyNote = Boolean(entry.dailyNote.trim());
-  return hasWorkout || hasNutrition || hasSleep || hasDailyNote;
+  const hasBodyMetrics = Boolean(
+    entry.bodyMetrics &&
+      (Number(entry.bodyMetrics.weight) > 0 ||
+        Number(entry.bodyMetrics.bodyFatPct) > 0)
+  );
+  const hasHabits = Boolean(
+    entry.habitLogs &&
+      Object.values(entry.habitLogs).some(
+        (h) =>
+          h &&
+          (h.status === "yes" ||
+            h.status === "no" ||
+            (typeof h.value === "string" && h.value.trim().length > 0))
+      )
+  );
+  return hasWorkout || hasNutrition || hasSleep || hasDailyNote || hasBodyMetrics || hasHabits;
 }
 
 function shiftIsoDate(isoDate: string, deltaDays: number): string {
@@ -453,6 +469,98 @@ export function findPreviousExerciseSets(
     }
   }
   return null;
+}
+
+export function findPreviousRoutineSession(
+  profile: UserProfileStore,
+  beforeDate: string,
+  routineId: string,
+  routineName: string
+): {
+  sourceDate: string;
+  gymDurationMinutes: number;
+  workoutRating?: number;
+  exercises: WorkoutExercise[];
+} | null {
+  const cleanName = routineName.trim().toLowerCase();
+  const prevDates = Object.keys(profile.days)
+    .filter((d) => d < beforeDate)
+    .sort((a, b) => b.localeCompare(a));
+
+  for (const d of prevDates) {
+    const w = profile.days[d]?.workout;
+    if (!w || w.exercises.length === 0) continue;
+    const matchesId = routineId && w.routineId === routineId;
+    const matchesTitle =
+      cleanName && w.sessionTitle.trim().toLowerCase() === cleanName;
+    if (matchesId || matchesTitle) {
+      return {
+        sourceDate: d,
+        gymDurationMinutes: w.gymDurationMinutes,
+        workoutRating: w.workoutRating ?? profile.days[d]?.dailyWorkoutRating,
+        exercises: w.exercises,
+      };
+    }
+  }
+  return null;
+}
+
+export function buildRoutineExercisesWithHistory(
+  profile: UserProfileStore,
+  beforeDate: string,
+  routine: WorkoutRoutineTemplate
+): { sourceDate: string | null; exercises: WorkoutExercise[] } {
+  const prevSession = findPreviousRoutineSession(
+    profile,
+    beforeDate,
+    routine.id,
+    routine.name
+  );
+  const stamp = Date.now();
+  let matchedSourceDate: string | null = prevSession?.sourceDate || null;
+
+  const exercises: WorkoutExercise[] = routine.exercises.map((tpl, exIdx) => {
+    const prevFromSession = prevSession?.exercises.find(
+      (ex) => ex.name.trim().toLowerCase() === tpl.name.trim().toLowerCase()
+    );
+    const prevAnywhere = prevFromSession
+      ? { sourceDate: prevSession!.sourceDate, sets: prevFromSession.sets }
+      : findPreviousExerciseSets(profile, beforeDate, tpl.name);
+
+    if (prevAnywhere && !matchedSourceDate) {
+      matchedSourceDate = prevAnywhere.sourceDate;
+    }
+
+    const isBodyweight = tpl.exerciseType === "bodyweight";
+    const sets: ExerciseSet[] =
+      prevAnywhere && prevAnywhere.sets.length > 0
+        ? prevAnywhere.sets.map((s, sIdx) => ({
+            id: `s-${stamp}-${exIdx}-${sIdx}-${Math.random().toString(36).slice(2, 5)}`,
+            weight: isBodyweight ? 0 : Number(s.weight) || 0,
+            reps: Number(s.reps) || tpl.baselineReps,
+            completed: true,
+          }))
+        : Array.from({ length: Math.max(1, tpl.defaultSets) }, (_, sIdx) => ({
+            id: `s-${stamp}-${exIdx}-${sIdx}-${Math.random().toString(36).slice(2, 5)}`,
+            weight: isBodyweight ? 0 : tpl.baselineWeight,
+            reps: tpl.baselineReps,
+            completed: true,
+          }));
+
+    return {
+      id: `ex-${stamp}-${exIdx}-${Math.random().toString(36).slice(2, 5)}`,
+      name: tpl.name,
+      muscleGroup: tpl.muscleGroup,
+      exerciseType: tpl.exerciseType,
+      targetRepRange: tpl.repRange,
+      note: prevAnywhere
+        ? `Previous (${prevAnywhere.sourceDate}) · Target ${tpl.repRange} reps`
+        : `Target ${tpl.repRange} reps`,
+      sets,
+    };
+  });
+
+  return { sourceDate: matchedSourceDate, exercises };
 }
 
 export function computeUserFrequentStaples(
