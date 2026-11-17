@@ -312,8 +312,7 @@ export async function POST(req: NextRequest) {
       analysis,
     });
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const buildFallbackResponse = () => {
       if (mode === "optimize-day") {
         return NextResponse.json({
           ok: true,
@@ -342,14 +341,19 @@ export async function POST(req: NextRequest) {
         interactionId: `offline_fallback_${Date.now()}`,
         reply: `Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`,
       });
+    };
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return buildFallbackResponse();
     }
 
-    try {
-      const client = new GoogleGenAI({ apiKey });
+    const client = new GoogleGenAI({ apiKey });
 
+    const runGeminiInteraction = async (activeModel: AllowedGeminiModel) => {
       if (mode === "optimize-day") {
         const interaction = await client.interactions.create({
-          model,
+          model: activeModel,
           system_instruction:
             "You are an elite clinical sports physiologist and recovery coach inside PulseLoop Fitness. Analyze the athlete's real-time workout strain, nutrition macros, and sleep architecture, then prescribe concrete recovery steps, one optimal recovery meal, and one accessory/recovery exercise matching their exact weight unit.",
           input: `Analyze this daily telemetry for workspace /u/${slug} on ${date} and return a recovery prescription:\n\n${telemetryContext}`,
@@ -426,7 +430,7 @@ export async function POST(req: NextRequest) {
 
         const prescription: AiRecoveryPrescription = {
           ...parsed,
-          model: interaction.model || model,
+          model: interaction.model || activeModel,
           interactionId: interaction.id,
           generatedAt: new Date().toISOString(),
         };
@@ -435,7 +439,7 @@ export async function POST(req: NextRequest) {
           ok: true,
           mode,
           source: "gemini-interactions-api",
-          model: interaction.model || model,
+          model: interaction.model || activeModel,
           interactionId: interaction.id,
           prescription,
         });
@@ -443,7 +447,7 @@ export async function POST(req: NextRequest) {
 
       if (mode === "smart-log") {
         const interaction = await client.interactions.create({
-          model,
+          model: activeModel,
           system_instruction: `You are a structured fitness, nutrition, and sleep log parser for PulseLoop (/u/${slug}). Convert the user's natural language into structured exercises (${profile.weightUnit}), meals (kcal/protein/carbs/fats), and numeric deltas for sleepHoursDelta, deepSleepHoursDelta, gymMinutesDelta, and cardioMinutesDelta (default deltas to 0 if not mentioned).`,
           input: `Current athlete context:\n${telemetryContext}\n\nNatural-language log input to parse:\n"${prompt}"`,
           response_format: {
@@ -519,7 +523,7 @@ export async function POST(req: NextRequest) {
           ok: true,
           mode,
           source: "gemini-interactions-api",
-          model: interaction.model || model,
+          model: interaction.model || activeModel,
           interactionId: interaction.id,
           parsed,
         });
@@ -527,7 +531,7 @@ export async function POST(req: NextRequest) {
 
       // mode === "coach" (Stateful Interactions API with previous_interaction_id)
       const interaction = await client.interactions.create({
-        model,
+        model: activeModel,
         system_instruction:
           "You are the PulseLoop AI Performance Coach embedded directly inside the athlete's live workspace URL. Give concise, practical, evidence-based guidance grounded in their current strain, sleep architecture, and nutrition numbers. Use short bullet points when recommending adjustments.",
         input: `Latest workspace telemetry (/u/${slug}, ${date}):\n${telemetryContext}\n\nAthlete question: ${prompt}`,
@@ -540,40 +544,32 @@ export async function POST(req: NextRequest) {
         ok: true,
         mode,
         source: "gemini-interactions-api",
-        model: interaction.model || model,
+        model: interaction.model || activeModel,
         interactionId: interaction.id,
         reply: interaction.output_text || "No response generated.",
       });
+    };
+
+    try {
+      return await runGeminiInteraction(model);
     } catch (apiErr) {
+      if (model !== "gemini-4-hydrogen") {
+        try {
+          console.warn(
+            `Model ${model} failed, retrying with gemini-4-hydrogen:`,
+            apiErr
+          );
+          return await runGeminiInteraction("gemini-4-hydrogen");
+        } catch (retryErr) {
+          console.warn(
+            "Gemini Interactions API retry fallback:",
+            retryErr
+          );
+          return buildFallbackResponse();
+        }
+      }
       console.warn("Gemini Interactions API network/API fallback:", apiErr);
-      if (mode === "optimize-day") {
-        return NextResponse.json({
-          ok: true,
-          mode,
-          source: "local-fallback",
-          model,
-          interactionId: `offline_fallback_${Date.now()}`,
-          prescription: buildFallbackPrescription(entry, profile, analysis, model),
-        });
-      }
-      if (mode === "smart-log") {
-        return NextResponse.json({
-          ok: true,
-          mode,
-          source: "local-fallback",
-          model,
-          interactionId: `offline_fallback_${Date.now()}`,
-          parsed: buildFallbackSmartLog(prompt, profile),
-        });
-      }
-      return NextResponse.json({
-        ok: true,
-        mode,
-        source: "local-fallback",
-        model,
-        interactionId: `offline_fallback_${Date.now()}`,
-        reply: `Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`,
-      });
+      return buildFallbackResponse();
     }
   } catch (err) {
     return NextResponse.json(

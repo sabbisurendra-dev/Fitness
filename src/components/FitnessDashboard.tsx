@@ -503,6 +503,367 @@ export default function FitnessDashboard({
     }));
   };
 
+  // Gemini Interactions API helpers (wired to /api/gemini for /, /u/[slug])
+  const handleTextareaKeyDown = (
+    e: React.KeyboardEvent<HTMLTextAreaElement>
+  ) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (e.nativeEvent.isComposing || e.keyCode === 229) {
+        return;
+      }
+      e.currentTarget.form?.requestSubmit();
+    }
+  };
+
+  const handleOptimizeDay = async () => {
+    if (geminiLoadingMode !== null) return;
+    setGeminiLoadingMode("optimize-day");
+    try {
+      const res = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "optimize-day",
+          model: geminiModel,
+          slug,
+          date: selectedDate,
+          entry: currentDay,
+          profile,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok || !data?.prescription) {
+        throw new Error(data?.error || "Unable to generate daily prescription.");
+      }
+      const prescription = data.prescription as AiRecoveryPrescription;
+      updateCurrentDay((d) => ({
+        ...d,
+        aiCoach: {
+          messages: d.aiCoach?.messages || [],
+          lastInteractionId:
+            data.interactionId || d.aiCoach?.lastInteractionId,
+          prescription,
+        },
+      }));
+      setGeminiStatusMessage(
+        `Gemini (${data.model || geminiModel}) generated recovery prescription: ${prescription.headline}`
+      );
+    } catch (err) {
+      setGeminiStatusMessage(
+        err instanceof Error ? err.message : "Failed to run Gemini optimizer."
+      );
+    } finally {
+      setGeminiLoadingMode(null);
+    }
+  };
+
+  const handleApplyRecommendedMeal = (
+    meal: NonNullable<AiRecoveryPrescription["recommendedMeal"]>
+  ) => {
+    const newMeal: MealEntry = {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: meal.time || "20:00",
+      name: meal.name,
+      calories: Math.max(0, Math.round(Number(meal.calories) || 0)),
+      protein: Math.max(0, Math.round(Number(meal.protein) || 0)),
+      carbs: Math.max(0, Math.round(Number(meal.carbs) || 0)),
+      fats: Math.max(0, Math.round(Number(meal.fats) || 0)),
+      note: meal.note || "Added from Gemini Prescription",
+    };
+
+    updateCurrentDay((d) => ({
+      ...d,
+      nutrition: {
+        ...d.nutrition,
+        ...(d.nutrition.useMealSum
+          ? {}
+          : {
+              calories: d.nutrition.calories + newMeal.calories,
+              protein: d.nutrition.protein + newMeal.protein,
+              carbs: d.nutrition.carbs + newMeal.carbs,
+              fats: d.nutrition.fats + newMeal.fats,
+            }),
+        meals: [...d.nutrition.meals, newMeal],
+      },
+    }));
+    setGeminiStatusMessage(
+      `Logged recommended meal "${newMeal.name}" (${newMeal.calories} kcal, ${newMeal.protein}g P).`
+    );
+  };
+
+  const handleApplyRecommendedExercise = (
+    ex: NonNullable<AiRecoveryPrescription["recommendedExercise"]>
+  ) => {
+    const numSets = Math.max(1, Math.min(8, Math.round(Number(ex.sets) || 3)));
+    const stamp = Date.now();
+    const sets: ExerciseSet[] = Array.from({ length: numSets }, (_, idx) => ({
+      id: `s-${stamp}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
+      weight: Math.max(0, Number(ex.weight) || 0),
+      reps: Math.max(1, Math.round(Number(ex.reps) || 10)),
+      rpe: Math.max(1, Math.min(10, Number(ex.rpe) || 8)),
+      completed: true,
+    }));
+    const newExercise: WorkoutExercise = {
+      id: `ex-${stamp}-${Math.random().toString(36).slice(2, 5)}`,
+      name: ex.name,
+      muscleGroup: ex.muscleGroup || "Strength",
+      sets,
+      note: ex.note || "Added from Gemini Prescription",
+    };
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        exercises: [...d.workout.exercises, newExercise],
+      },
+    }));
+    setGeminiStatusMessage(
+      `Added exercise "${newExercise.name}" (${numSets} sets) to Workouts.`
+    );
+  };
+
+  const handleSmartLogSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const promptText = smartLogInput.trim();
+    if (!promptText) {
+      setSmartLogError("Enter a workout, meal, or sleep update to log.");
+      smartLogTextareaRef.current?.focus();
+      return;
+    }
+    if (geminiLoadingMode !== null) return;
+
+    setSmartLogError("");
+    setGeminiLoadingMode("smart-log");
+    try {
+      const res = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "smart-log",
+          model: geminiModel,
+          slug,
+          date: selectedDate,
+          prompt: promptText,
+          entry: currentDay,
+          profile,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok || !data?.parsed) {
+        throw new Error(data?.error || "Unable to parse smart log input.");
+      }
+
+      const parsed = data.parsed as {
+        summaryMessage?: string;
+        exercisesToAdd?: Array<{
+          name: string;
+          muscleGroup: string;
+          weight: number;
+          reps: number;
+          sets: number;
+          rpe: number;
+          note: string;
+        }>;
+        mealsToAdd?: Array<{
+          time: string;
+          name: string;
+          calories: number;
+          protein: number;
+          carbs: number;
+          fats: number;
+          note: string;
+        }>;
+        sleepHoursDelta?: number;
+        deepSleepHoursDelta?: number;
+        gymMinutesDelta?: number;
+        cardioMinutesDelta?: number;
+      };
+
+      const stamp = Date.now();
+      const addedExercises: WorkoutExercise[] = (
+        parsed.exercisesToAdd || []
+      ).map((ex, exIdx) => {
+        const count = Math.max(1, Math.min(8, Math.round(Number(ex.sets) || 3)));
+        return {
+          id: `ex-${stamp}-${exIdx}-${Math.random().toString(36).slice(2, 5)}`,
+          name: ex.name || "Logged Exercise",
+          muscleGroup: ex.muscleGroup || "Strength",
+          note: ex.note || "",
+          sets: Array.from({ length: count }, (_, sIdx) => ({
+            id: `s-${stamp}-${exIdx}-${sIdx}-${Math.random().toString(36).slice(2, 5)}`,
+            weight: Math.max(0, Number(ex.weight) || 0),
+            reps: Math.max(1, Math.round(Number(ex.reps) || 10)),
+            rpe: Math.max(1, Math.min(10, Number(ex.rpe) || 8)),
+            completed: true,
+          })),
+        };
+      });
+
+      const addedMeals: MealEntry[] = (parsed.mealsToAdd || []).map(
+        (m, mIdx) => ({
+          id: `m-${stamp}-${mIdx}-${Math.random().toString(36).slice(2, 5)}`,
+          time: m.time || "12:30",
+          name: m.name || "Logged Meal",
+          calories: Math.max(0, Math.round(Number(m.calories) || 0)),
+          protein: Math.max(0, Math.round(Number(m.protein) || 0)),
+          carbs: Math.max(0, Math.round(Number(m.carbs) || 0)),
+          fats: Math.max(0, Math.round(Number(m.fats) || 0)),
+          note: m.note || "",
+        })
+      );
+
+      const addedMealTotals = addedMeals.reduce(
+        (acc, m) => ({
+          calories: acc.calories + m.calories,
+          protein: acc.protein + m.protein,
+          carbs: acc.carbs + m.carbs,
+          fats: acc.fats + m.fats,
+        }),
+        { calories: 0, protein: 0, carbs: 0, fats: 0 }
+      );
+
+      const gymDelta = Number(parsed.gymMinutesDelta) || 0;
+      const cardioDelta = Number(parsed.cardioMinutesDelta) || 0;
+      const sleepDelta = Number(parsed.sleepHoursDelta) || 0;
+      const deepDelta = Number(parsed.deepSleepHoursDelta) || 0;
+
+      updateCurrentDay((d) => ({
+        ...d,
+        workout: {
+          ...d.workout,
+          gymDurationMinutes: Math.max(
+            0,
+            Math.round(d.workout.gymDurationMinutes + gymDelta)
+          ),
+          cardioMinutes: Math.max(
+            0,
+            Math.round(d.workout.cardioMinutes + cardioDelta)
+          ),
+          exercises: [...d.workout.exercises, ...addedExercises],
+        },
+        nutrition: {
+          ...d.nutrition,
+          ...(d.nutrition.useMealSum
+            ? {}
+            : {
+                calories: d.nutrition.calories + addedMealTotals.calories,
+                protein: d.nutrition.protein + addedMealTotals.protein,
+                carbs: d.nutrition.carbs + addedMealTotals.carbs,
+                fats: d.nutrition.fats + addedMealTotals.fats,
+              }),
+          meals: [...d.nutrition.meals, ...addedMeals],
+        },
+        sleep: {
+          ...d.sleep,
+          totalHours: Math.max(
+            0,
+            Number((d.sleep.totalHours + sleepDelta).toFixed(1))
+          ),
+          deepSleepHours: Math.max(
+            0,
+            Number((d.sleep.deepSleepHours + deepDelta).toFixed(1))
+          ),
+        },
+      }));
+
+      setSmartLogInput("");
+      setGeminiStatusMessage(
+        parsed.summaryMessage ||
+          `Smart-logged ${addedExercises.length} exercise(s) and ${addedMeals.length} meal(s).`
+      );
+    } catch (err) {
+      setSmartLogError(
+        err instanceof Error ? err.message : "Failed to parse smart log."
+      );
+    } finally {
+      setGeminiLoadingMode(null);
+    }
+  };
+
+  const handleCoachSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const promptText = coachInput.trim();
+    if (!promptText) {
+      setCoachError("Enter a question for your Gemini coach.");
+      coachTextareaRef.current?.focus();
+      return;
+    }
+    if (geminiLoadingMode !== null) return;
+
+    setCoachError("");
+    setCoachInput("");
+    setGeminiLoadingMode("coach");
+
+    try {
+      const res = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "coach",
+          model: geminiModel,
+          slug,
+          date: selectedDate,
+          prompt: promptText,
+          previousInteractionId: currentDay.aiCoach?.lastInteractionId,
+          entry: currentDay,
+          profile,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Gemini coach request failed.");
+      }
+
+      const nowIso = new Date().toISOString();
+      const userMsg: AiCoachMessage = {
+        id: `msg-u-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        role: "user",
+        text: promptText,
+        createdAt: nowIso,
+      };
+      const assistantMsg: AiCoachMessage = {
+        id: `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        role: "assistant",
+        text: data.reply || "No response returned.",
+        model: data.model || geminiModel,
+        interactionId: data.interactionId,
+        createdAt: nowIso,
+      };
+
+      updateCurrentDay((d) => ({
+        ...d,
+        aiCoach: {
+          prescription: d.aiCoach?.prescription || null,
+          lastInteractionId:
+            data.interactionId || d.aiCoach?.lastInteractionId,
+          messages: [...(d.aiCoach?.messages || []), userMsg, assistantMsg],
+        },
+      }));
+      setGeminiStatusMessage(
+        `Gemini coach (${data.model || geminiModel}) replied.`
+      );
+    } catch (err) {
+      setCoachError(
+        err instanceof Error ? err.message : "Failed to reach Gemini coach."
+      );
+    } finally {
+      setGeminiLoadingMode(null);
+    }
+  };
+
+  const handleResetCoachThread = () => {
+    updateCurrentDay((d) => ({
+      ...d,
+      aiCoach: {
+        prescription: d.aiCoach?.prescription || null,
+        lastInteractionId: undefined,
+        messages: [],
+      },
+    }));
+    setGeminiStatusMessage("Started a fresh Gemini Interactions thread.");
+  };
+
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
 
   return (
@@ -774,6 +1135,28 @@ export default function FitnessDashboard({
                 <span className="text-xs text-[var(--text-muted)]">
                   WHOOP / Oura / Clinical Sufficiency Engine
                 </span>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeTab !== "all") {
+                      setActiveTab("all");
+                      setShowAiHub(true);
+                    } else {
+                      setShowAiHub((v) => !v);
+                    }
+                  }}
+                  aria-expanded={activeTab === "all" && showAiHub}
+                  aria-controls="gemini-ai-hub"
+                  className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
+                >
+                  <Sparkles className="h-3 w-3" aria-hidden="true" />
+                  <span>
+                    {activeTab === "all" && showAiHub
+                      ? "Hide Gemini AI Hub"
+                      : "Open Gemini AI Hub"}
+                  </span>
+                </button>
               </div>
 
               <h1 className="text-lg font-bold tracking-tight sm:text-xl">
@@ -891,6 +1274,470 @@ export default function FitnessDashboard({
             />
           </div>
         </section>
+
+        {/* =========================================================
+            GEMINI INTERACTIONS API AI HUB (Per-URL & Per-Date Stateful Coach)
+           ========================================================= */}
+        {activeTab === "all" && showAiHub && (
+          <section
+            id="gemini-ai-hub"
+            aria-labelledby="heading-gemini-hub"
+            className="rounded-2xl border border-emerald-500/30 bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
+                  <Sparkles className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <h2
+                    id="heading-gemini-hub"
+                    className="text-base font-bold sm:text-lg"
+                  >
+                    Gemini Interactions AI Hub
+                  </h2>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Stateful Gemini 4 coaching, smart logging &amp; recovery prescriptions synced to{" "}
+                    <code className="text-emerald-400">/u/{slug}</code>
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5">
+                <fieldset className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1.5">
+                  <legend className="px-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                    Gemini Model
+                  </legend>
+                  <div className="inline-flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      id="model-hydrogen"
+                      name="geminiModel"
+                      value="gemini-4-hydrogen"
+                      checked={geminiModel === "gemini-4-hydrogen"}
+                      onChange={() => setGeminiModel("gemini-4-hydrogen")}
+                      className="h-3.5 w-3.5 accent-emerald-500"
+                    />
+                    <label
+                      htmlFor="model-hydrogen"
+                      className="text-xs font-medium cursor-pointer"
+                    >
+                      gemini-4-hydrogen
+                    </label>
+                  </div>
+                  <div className="inline-flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      id="model-argon"
+                      name="geminiModel"
+                      value="gemini-4-argon"
+                      checked={geminiModel === "gemini-4-argon"}
+                      onChange={() => setGeminiModel("gemini-4-argon")}
+                      className="h-3.5 w-3.5 accent-emerald-500"
+                    />
+                    <label
+                      htmlFor="model-argon"
+                      className="text-xs font-medium cursor-pointer"
+                    >
+                      gemini-4-argon
+                    </label>
+                  </div>
+                </fieldset>
+
+                <button
+                  type="button"
+                  onClick={handleOptimizeDay}
+                  disabled={geminiLoadingMode !== null}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3.5 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 transition"
+                >
+                  {geminiLoadingMode === "optimize-day" ? (
+                    <>
+                      <RefreshCw
+                        className="h-3.5 w-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                      <span>Analyzing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Wand2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Optimize Day with Gemini</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {geminiStatusMessage && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400"
+              >
+                {geminiStatusMessage}
+              </div>
+            )}
+
+            {/* Recovery Prescription Output (from Optimize Day) */}
+            {currentDay.aiCoach?.prescription && (
+              <div className="rounded-xl border border-emerald-500/30 bg-[var(--bg-elevated)] p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
+                      Daily Recovery Prescription
+                    </div>
+                    <h3 className="text-sm font-bold sm:text-base">
+                      {currentDay.aiCoach.prescription.headline}
+                    </h3>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-muted)] max-w-full">
+                    {currentDay.aiCoach.prescription.model && (
+                      <span className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 font-mono">
+                        {currentDay.aiCoach.prescription.model}
+                      </span>
+                    )}
+                    {currentDay.aiCoach.prescription.interactionId && (
+                      <span
+                        title={currentDay.aiCoach.prescription.interactionId}
+                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 font-mono truncate max-w-[160px]"
+                      >
+                        {currentDay.aiCoach.prescription.interactionId}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
+                  {currentDay.aiCoach.prescription.summary}
+                </p>
+
+                {currentDay.aiCoach.prescription.actionItems?.length > 0 && (
+                  <ul className="list-disc pl-5 space-y-1 text-xs text-[var(--text-primary)]">
+                    {currentDay.aiCoach.prescription.actionItems.map(
+                      (item, idx) => (
+                        <li key={idx}>{item}</li>
+                      )
+                    )}
+                  </ul>
+                )}
+
+                <div className="grid gap-2.5 sm:grid-cols-2 pt-1">
+                  {currentDay.aiCoach.prescription.recommendedMeal && (
+                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-semibold text-amber-400">
+                            Recommended Recovery Meal
+                          </div>
+                          <div className="text-xs font-bold">
+                            {currentDay.aiCoach.prescription.recommendedMeal.name}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleApplyRecommendedMeal(
+                              currentDay.aiCoach!.prescription!.recommendedMeal!
+                            )
+                          }
+                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-semibold text-amber-400 hover:bg-amber-500/25 transition"
+                        >
+                          <Plus className="h-3 w-3" aria-hidden="true" />
+                          <span>Log Recommended Meal</span>
+                        </button>
+                      </div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {currentDay.aiCoach.prescription.recommendedMeal.calories} kcal ·{" "}
+                        {currentDay.aiCoach.prescription.recommendedMeal.protein}g P ·{" "}
+                        {currentDay.aiCoach.prescription.recommendedMeal.carbs}g C ·{" "}
+                        {currentDay.aiCoach.prescription.recommendedMeal.fats}g F
+                      </div>
+                    </div>
+                  )}
+
+                  {currentDay.aiCoach.prescription.recommendedExercise && (
+                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-semibold text-sky-400">
+                            Recommended Exercise
+                          </div>
+                          <div className="text-xs font-bold">
+                            {currentDay.aiCoach.prescription.recommendedExercise.name}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleApplyRecommendedExercise(
+                              currentDay.aiCoach!.prescription!.recommendedExercise!
+                            )
+                          }
+                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/25 transition"
+                        >
+                          <Plus className="h-3 w-3" aria-hidden="true" />
+                          <span>Add Recommended Exercise</span>
+                        </button>
+                      </div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {currentDay.aiCoach.prescription.recommendedExercise.sets} sets ×{" "}
+                        {currentDay.aiCoach.prescription.recommendedExercise.reps} reps @{" "}
+                        {currentDay.aiCoach.prescription.recommendedExercise.weight}{" "}
+                        {profile.weightUnit} (RPE{" "}
+                        {currentDay.aiCoach.prescription.recommendedExercise.rpe})
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 2-Column Interactive Tools: Smart Logger + Stateful Coach */}
+            <div className="grid gap-4 lg:grid-cols-2">
+              {/* Smart Logger Form */}
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3 min-w-0">
+                <div className="flex items-center gap-2">
+                  <Wand2 className="h-4 w-4 text-sky-400" aria-hidden="true" />
+                  <h3
+                    id="heading-smart-logger"
+                    className="text-sm font-bold"
+                  >
+                    Natural-Language Smart Logger
+                  </h3>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSmartLogInput(
+                        "Did 4x8 Barbell Squats at 90kg and drank a 40g protein shake (320 kcal)"
+                      )
+                    }
+                    className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] text-[var(--text-muted)] hover:text-sky-400 hover:border-sky-500/40 transition"
+                  >
+                    Sample: Squat + Shake
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSmartLogInput(
+                        "Added 20 min Zone 2 walk and 0.5h extra sleep"
+                      )
+                    }
+                    className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] text-[var(--text-muted)] hover:text-sky-400 hover:border-sky-500/40 transition"
+                  >
+                    Sample: Cardio + Sleep
+                  </button>
+                </div>
+
+                <form
+                  aria-labelledby="heading-smart-logger"
+                  onSubmit={handleSmartLogSubmit}
+                  className="space-y-2"
+                >
+                  <label
+                    htmlFor="smart-log-input"
+                    className="block text-xs font-medium text-[var(--text-muted)]"
+                  >
+                    Describe workouts, meals, or sleep updates
+                  </label>
+                  <textarea
+                    ref={smartLogTextareaRef}
+                    id="smart-log-input"
+                    name="smartLog"
+                    value={smartLogInput}
+                    onChange={(e) => {
+                      setSmartLogInput(e.target.value);
+                      if (smartLogError) setSmartLogError("");
+                    }}
+                    onKeyDown={handleTextareaKeyDown}
+                    aria-invalid={Boolean(smartLogError)}
+                    aria-describedby={
+                      smartLogError ? "smart-log-error" : "smart-log-hint"
+                    }
+                    placeholder="e.g., Did 3x10 Romanian Deadlift at 80kg and ate a chicken bowl (650 kcal, 52g protein)"
+                    className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs sm:text-sm focus:border-sky-500 focus:outline-none"
+                  />
+                  <p
+                    id="smart-log-hint"
+                    className="text-[11px] text-[var(--text-muted)]"
+                  >
+                    Press Enter to log with Gemini · Shift+Enter for a new line.
+                  </p>
+                  {smartLogError && (
+                    <p
+                      id="smart-log-error"
+                      role="alert"
+                      className="text-xs font-medium text-rose-400"
+                    >
+                      {smartLogError}
+                    </p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={geminiLoadingMode !== null}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-60 transition"
+                  >
+                    {geminiLoadingMode === "smart-log" ? (
+                      <>
+                        <RefreshCw
+                          className="h-3.5 w-3.5 animate-spin"
+                          aria-hidden="true"
+                        />
+                        <span>Parsing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Smart Log to /u/{slug}</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
+
+              {/* Stateful Gemini Coach Form */}
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3 min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Bot
+                      className="h-4 w-4 text-emerald-400"
+                      aria-hidden="true"
+                    />
+                    <h3
+                      id="heading-coach-chat"
+                      className="text-sm font-bold"
+                    >
+                      Stateful Gemini Coach
+                    </h3>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {currentDay.aiCoach?.lastInteractionId && (
+                      <span
+                        title={currentDay.aiCoach.lastInteractionId}
+                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] font-mono text-[var(--text-muted)] truncate max-w-[120px]"
+                      >
+                        {currentDay.aiCoach.lastInteractionId}
+                      </span>
+                    )}
+                    {(currentDay.aiCoach?.messages?.length || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleResetCoachThread}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-muted)] hover:text-emerald-400 transition"
+                      >
+                        <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                        <span>New Thread</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Conversation Thread */}
+                <div className="max-h-56 overflow-y-auto space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                  {!currentDay.aiCoach?.messages?.length ? (
+                    <p className="text-xs text-[var(--text-muted)]">
+                      Ask about today&apos;s {analysis.strainScore}/21 strain,
+                      how much protein/sleep you still need, or progression for{" "}
+                      <code className="text-emerald-400">/u/{slug}</code>. Follow-ups automatically chain via{" "}
+                      <code>previous_interaction_id</code>.
+                    </p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {currentDay.aiCoach.messages.map((msg) => (
+                        <li
+                          key={msg.id}
+                          className={`rounded-lg px-2.5 py-2 text-xs leading-relaxed ${
+                            msg.role === "user"
+                              ? "border border-emerald-500/30 bg-emerald-500/10"
+                              : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
+                          }`}
+                        >
+                          <div className="mb-0.5 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                            <span>
+                              {msg.role === "user" ? "You" : "Gemini Coach"}
+                            </span>
+                            {msg.model && <span>{msg.model}</span>}
+                          </div>
+                          <div className="whitespace-pre-wrap break-words">
+                            {msg.text}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <form
+                  aria-labelledby="heading-coach-chat"
+                  onSubmit={handleCoachSubmit}
+                  className="space-y-2"
+                >
+                  <label
+                    htmlFor="coach-chat-input"
+                    className="block text-xs font-medium text-[var(--text-muted)]"
+                  >
+                    Ask your Gemini coach (multi-turn memory)
+                  </label>
+                  <textarea
+                    ref={coachTextareaRef}
+                    id="coach-chat-input"
+                    name="coachPrompt"
+                    value={coachInput}
+                    onChange={(e) => {
+                      setCoachInput(e.target.value);
+                      if (coachError) setCoachError("");
+                    }}
+                    onKeyDown={handleTextareaKeyDown}
+                    aria-invalid={Boolean(coachError)}
+                    aria-describedby={
+                      coachError ? "coach-chat-error" : "coach-chat-hint"
+                    }
+                    placeholder="e.g., Is my 1.6h deep sleep enough for today's bench & pulldown volume?"
+                    className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs sm:text-sm focus:border-emerald-500 focus:outline-none"
+                  />
+                  <p
+                    id="coach-chat-hint"
+                    className="text-[11px] text-[var(--text-muted)]"
+                  >
+                    Press Enter to send · Shift+Enter for a new line.
+                  </p>
+                  {coachError && (
+                    <p
+                      id="coach-chat-error"
+                      role="alert"
+                      className="text-xs font-medium text-rose-400"
+                    >
+                      {coachError}
+                    </p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={geminiLoadingMode !== null}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 transition"
+                  >
+                    {geminiLoadingMode === "coach" ? (
+                      <>
+                        <RefreshCw
+                          className="h-3.5 w-3.5 animate-spin"
+                          aria-hidden="true"
+                        />
+                        <span>Thinking...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Ask Coach</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* =========================================================
             MODULE 1: WORKOUTS (Gym Duration, Exercises, Sets, Reps, Weight, Notes)
