@@ -4,7 +4,7 @@
 
 - **Live Production App:** [https://pulse-loop-fitness.vercel.app](https://pulse-loop-fitness.vercel.app)
 - **Custom Athlete Workspaces:** `https://pulse-loop-fitness.vercel.app/u/<slug>` (root `/` defaults to `/u/main`)
-- **GitHub Repository:** [https://github.com/sabbisurendra-dev/pulse-loop-fitness](https://github.com/sabbisurendra-dev/pulse-loop-fitness)
+- **GitHub Repository:** [https://github.com/sabbisurendra-dev/Fitness](https://github.com/sabbisurendra-dev/Fitness)
 - **Vercel Blob Store:** `pulse-loop-fitness-store`
 
 ---
@@ -16,6 +16,8 @@
 | [docs/MVP_V1_SPECIFICATION.md](docs/MVP_V1_SPECIFICATION.md) | Complete MVP v1 Product, Sufficiency Formula, UI Module, Storage, AI & Resume-Work Specification |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Market Research Synthesis (WHOOP, Oura, Apple, Garmin, Samsung, Fitbit, Hevy, MacroFactor, Cronometer, TrueCoach) & Architectural Decisions |
 | [docs/MARKET_RESEARCH_AI_EMPLOYEES.md](docs/MARKET_RESEARCH_AI_EMPLOYEES.md) | Project-Scoped AI Employee Organization, File Ownership Matrix & Top 1% Operating Playbooks |
+| [docs/MVP_V1.md](docs/MVP_V1.md) | Product Manager Cumulative Prompt Ledger, OST, JTBD & Shape Up Acceptance Criteria |
+| [artifacts/](artifacts/) | Preserved Antigravity Brain Artifacts (`mvp_v1_document.md`, `implementation_plan.md`) & Browser Verification Evidence (`final_step_18.png`) |
 | [AGENTS.md](AGENTS.md) | Gemini 4 SDK (`@google/genai`) & Secret Hygiene Rules |
 | [.agents/rules/qa-gates.md](.agents/rules/qa-gates.md) | Mandatory Post-Edit UX & Technical QA Verification Gates |
 | [.agents/rules/ai-employees-org.md](.agents/rules/ai-employees-org.md) | Progressive Disclosure & Multi-Employee Routing Protocol |
@@ -50,8 +52,8 @@
 
 ### 1. Install & Configure
 ```bash
-git clone https://github.com/sabbisurendra-dev/pulse-loop-fitness.git
-cd pulse-loop-fitness
+git clone https://github.com/sabbisurendra-dev/Fitness.git
+cd Fitness
 npm install
 ```
 

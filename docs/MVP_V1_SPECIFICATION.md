@@ -4,7 +4,7 @@
 > **Version:** MVP v1 (`v1.0.0`)  
 > **Live Production App:** [https://pulse-loop-fitness.vercel.app](https://pulse-loop-fitness.vercel.app)  
 > **Custom User Workspace Pattern:** `https://pulse-loop-fitness.vercel.app/u/<slug>` (e.g., `/u/main`, `/u/alex`)  
-> **GitHub Repository:** [https://github.com/sabbisurendra-dev/pulse-loop-fitness](https://github.com/sabbisurendra-dev/pulse-loop-fitness)  
+> **GitHub Repository:** [https://github.com/sabbisurendra-dev/Fitness](https://github.com/sabbisurendra-dev/Fitness)  
 > **Cloud Storage:** Vercel Blob store `pulse-loop-fitness-store` (`fitness-profiles/<slug>.json`)  
 > **Tech Stack:** Next.js `^15.3.0` (App Router) · React `^19.0.0` · TypeScript `^5.8.0` (`strict: true`) · Tailwind CSS `^4.1.0` · `@google/genai` `^3.4.0` (Gemini 4 Interactions API) · `@vercel/blob` `^1.0.0` · Lucide Icons `^1.16.0`
 
@@ -297,7 +297,7 @@ Verifies via Node `assert/strict`:
 ### 6.1 Key Links & Infrastructure
 - **Live Web App:** [https://pulse-loop-fitness.vercel.app](https://pulse-loop-fitness.vercel.app)
 - **Custom Profile URL Example:** `https://pulse-loop-fitness.vercel.app/u/<your-name>`
-- **GitHub Repository:** [https://github.com/sabbisurendra-dev/pulse-loop-fitness](https://github.com/sabbisurendra-dev/pulse-loop-fitness)
+- **GitHub Repository:** [https://github.com/sabbisurendra-dev/Fitness](https://github.com/sabbisurendra-dev/Fitness)
 - **Vercel Blob Store:** `pulse-loop-fitness-store` (activated when `BLOB_READ_WRITE_TOKEN` is set in environment variables)
 
 ### 6.2 Repository Documentation & Code Map
@@ -324,8 +324,8 @@ During compilation of this MVP v1 specification, the following static & invarian
 
 ### Step 1: Clone or Open the Workspace
 ```bash
-git clone https://github.com/sabbisurendra-dev/pulse-loop-fitness.git
-cd pulse-loop-fitness
+git clone https://github.com/sabbisurendra-dev/Fitness.git
+cd Fitness
 npm install
 ```
 *(Or open `/Users/sabbisurendra/Downloads/Fitness` directly in Antigravity IDE.)*
