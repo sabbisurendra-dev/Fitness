@@ -1,0 +1,95 @@
+---
+name: ux-tester
+description: >-
+  Project-scoped UX, accessibility, responsive layout, theme parity, and interactive
+  flow verification skill for the PulseLoop Fitness, Nutrition & Sleep Sufficiency web app.
+  Use this skill whenever researching UI changes, implementing or modifying components,
+  updating workouts/nutrition/sleep modules, adjusting styles in globals.css, or running
+  pre-completion visual and interactive verification in a browser.
+---
+
+# PulseLoop UX Tester & Interactive Verification Runbook
+
+Use this skill to design, audit, and verify user-facing changes across `/` (`initialSlug="main"`) and `/u/[slug]` (`src/components/FitnessDashboard.tsx`, `src/app/globals.css`, `src/app/layout.tsx`). Every check below has an explicit **PASS / FAIL** criterion.
+
+---
+
+## 1. Responsive Layout & Zero Horizontal Overflow
+
+Verify across all three canonical viewport widths (`360px` Mobile, `768px` Tablet, `1280px` Desktop):
+
+- **UX-RESP-01 (Zero Horizontal Scroll)**:
+  - **Check**: Evaluate `document.documentElement.scrollWidth <= window.innerWidth` at `360×800`, `768×1024`, and `1280×900` across all module tabs (`All Modules`, `Workouts`, `Nutrition`, `Sleep & Recovery`, `Market Benchmarks`).
+  - **Pass**: `scrollWidth <= innerWidth` on every viewport; wide tables (such as the Hevy-style exercise set/rep/weight table) scroll horizontally inside their own `.overflow-x-auto` container without widening the page body.
+  - **Fail**: Any viewport exhibits horizontal page overflow or clipped right-hand controls.
+- **UX-RESP-02 (Sticky Header & Filter Pill Wrapping)**:
+  - **Check**: Inspect the sticky `<header>` containing the editable dashboard title, `/u/{slug}` badge, `Auto-Saved ✓` pill, `Custom URL` button, `Share Link` button, theme toggle, date picker (`<`, `date`, `>`, `Today`), and module filter pills.
+  - **Pass**: Controls wrap cleanly via `flex-wrap` at `360px` without overlapping, truncating button labels, or clipping focus rings.
+  - **Fail**: Header elements collide, overflow off-screen, or obscure the top sufficiency banner.
+- **UX-RESP-03 (Grid Adaptation Across Modules)**:
+  - **Check**: Verify the 4-card Readiness/Strain/Sleep/Fuel gauge strip (`grid-cols-2 sm:grid-cols-4`), the 6-card Nutrition macro grid (`grid-cols-2 sm:grid-cols-3 lg:grid-cols-6`), and the 8-column Sleep Architecture grid (`grid-cols-2 sm:grid-cols-4 lg:grid-cols-8`).
+  - **Pass**: Cards stack in 2 columns on mobile (`360px`) with legible numbers and expand cleanly at `sm` and `lg` breakpoints.
+  - **Fail**: Numeric inputs or unit labels (`kcal`, `hrs`, `kg`/`lbs`) get squished to zero width or overlap adjacent text.
+
+---
+
+## 2. Theme Parity (Dark & Light Modes) & Visual Contrast
+
+- **UX-THEME-01 (Live Dark / Light Mode Toggle & FOUC Prevention)**:
+  - **Check**: Click the header theme toggle button (`Switch to light theme` / `Switch to dark theme`) and reload the page.
+  - **Pass**: `<meta name="color-scheme">` updates between `"dark"` and `"light"`, `localStorage.getItem("color-scheme")` persists the choice across reloads, `:root` CSS variables (`--bg-canvas`, `--bg-surface`, `--bg-elevated`, `--text-primary`, `--text-muted`, `--border-subtle`) adapt immediately via `light-dark()`, and native browser controls (date/time inputs, scrollbars, checkboxes) match the active scheme.
+  - **Fail**: Flash of un-themed content on reload, stuck dark/light surfaces, or unreadable low-contrast text in either mode.
+- **UX-THEME-02 (Semantic Sufficiency Banner States)**:
+  - **Check**: Trigger all three `verdictLevel` states (`optimal` -> Emerald, `moderate` -> Amber, `deficit` -> Rose) in both Dark and Light themes.
+  - **Pass**: Status badges (`Optimal Recovery Loop`, `Borderline Sufficiency`, `Recovery / Fueling Deficit`), icons (`CheckCircle2`, `AlertTriangle`, `AlertOctagon`), and 3 clinical pillar dots communicate state via both text/icons and high-contrast color tokens.
+  - **Fail**: Status relies on color alone or becomes illegible in Light Mode.
+
+---
+
+## 3. End-to-End Interactive Flows & Persistence
+
+- **UX-FLOW-01 (Closed-Loop Sufficiency Reactivity)**:
+  - **Check**: Edit Workout `Time Spent in Gym (min)` (e.g., `65` -> `120`), add sets/reps, or lower Sleep `Total Sleep Duration (hrs)` (e.g., `7.8` -> `5.5`) and `Deep Sleep / SWS (hrs)` (`1.6` -> `0.8`).
+  - **Pass**: The top banner immediately recalculates `Readiness %`, `Gym Strain (/21)`, `Sleep vs Need`, `Deep %`, and the plain-English clinical explanations without requiring a page refresh or "Calculate" button.
+  - **Fail**: Stale summary numbers or NaN/Infinity values rendered when inputs are cleared or set to `0`.
+- **UX-FLOW-02 (Workouts Inline Logging & Unit Toggle)**:
+  - **Check**: Toggle weight unit (`Unit: KG` <-> `Unit: LBS`), click a Quick-Add preset pill (e.g., `+ Barbell Squat`), edit exercise name, muscle group, set weight, reps, RPE, toggle set `Done` checkbox, add/delete a set, and type into per-exercise and session notes.
+  - **Pass**: Unchecking a set's `Done` checkbox dims the row (`opacity-50`) and immediately subtracts its sets, reps, and volume (`weight * reps`) from the header total; deleting an exercise or set removes only that target item.
+  - **Fail**: Volume math includes unchecked sets, or deleting a set removes the wrong row.
+- **UX-FLOW-03 (Nutrition Hybrid Mode — Direct Override vs. Meal Auto-Sum)**:
+  - **Check**:
+    1. Check `Auto-sum totals from meal rows` (`useMealSum: true`) and edit a meal's `kcal` or `P(g)`. Verify top macro cards update automatically to the sum of all meals.
+    2. Directly type a new value into the top `Calories` or `Protein` card. Verify `useMealSum` automatically unchecks (`false`) and preserves the direct manual override.
+    3. Add, edit, and remove a Custom Health Metric (`Creatine`, `Daily Steps`, etc.).
+  - **Pass**: Both direct macro entry and meal-sum mode work seamlessly without overwriting user intent; progress bars clamp cleanly at `0%–100%`.
+  - **Fail**: Typing directly into daily Calories/Macros gets overwritten by meal sums, or division by zero occurs when a target is set to `0`.
+- **UX-FLOW-04 (Ubiquitous Inline Notes & Auto-Growing Textareas)**:
+  - **Check**: Type multi-line notes into the Daily Master Note, per-exercise note, Workout Session Note, per-meal note, custom metric note, Nutrition Note, and Sleep Note.
+  - **Pass**: Every note persists inline; `.auto-grow-textarea` elements expand vertically (`field-sizing: content`, `min-block-size: 2.75lh`, `max-block-size: 10lh`) without horizontal layout shift.
+  - **Fail**: Textareas shrink horizontally when typing or lose focus mid-keystroke.
+- **UX-FLOW-05 (Auto-Save Persistence, Date Navigation & Custom URL Switcher)**:
+  - **Check**:
+    1. Edit any metric, observe header badge transition `Saving...` -> `Auto-Saved ✓` / `Cloud Saved ✓` within `~400ms`, reload the page, and verify all edits remain intact.
+    2. Switch dates using `< Previous Day`, `Next Day >`, and `Today`, verifying each date maintains its own independent log.
+    3. Open `Custom URL`, enter a new slug (e.g., `test-athlete`), submit, and verify navigation to `/u/test-athlete` loads an isolated workspace with `/u/test-athlete` in the header.
+  - **Pass**: State persists across reloads per date and per user slug without cross-contaminating `/u/main`.
+  - **Fail**: Reloading loses recent edits, or switching dates overwrites today's log.
+
+---
+
+## 4. Accessibility, Mobile Ergonomics & Zero Console/Network Errors
+
+- **UX-A11Y-01 (Keyboard, ARIA Labels & Mobile Keypads)**:
+  - **Check**: Audit all inputs and icon-only buttons (`Previous Day`, `Next Day`, `Delete <exercise>`, `Switch to light/dark theme`). Verify numeric fields use `inputMode="numeric"` or `inputMode="decimal"`, and coarse pointer rules set `font-size: max(1rem, 1em)` and `min-block-size: 40px`.
+  - **Pass**: Every control has an explicit `<label>` or `aria-label`; live sync badge has `role="status" aria-live="polite"`; tapping inputs on iOS Safari / Android Chrome triggers the right keypad without viewport zoom.
+  - **Fail**: Unlabeled icon buttons, missing focus outlines, or `<16px` mobile input font sizes that trigger iOS auto-zoom.
+- **UX-CONSOLE-01 (Zero Runtime, Hydration, or Network Errors)**:
+  - **Check**: Inspect browser console and network tab during initial load, tab switching, theme toggling, and auto-saving (`GET /api/state`, `POST /api/state`).
+  - **Pass**: Zero `console.error`, zero uncaught exceptions, zero React hydration mismatches, and zero failed (`4xx`/`5xx`) asset or API requests.
+  - **Fail**: Any console error, hydration warning, or failed `/api/state` request.
+
+---
+
+## Custom Project UX Test Cases (User-Added)
+
+<!-- Append new user-spoken or user-typed UX test cases below this line using the UX-CUSTOM-XX format -->
