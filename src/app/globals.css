@@ -138,6 +138,52 @@ dialog.habit-catalog-dialog[open] {
   padding: 0;
 }
 
+dialog.calendar-picker-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  margin: auto auto 0 auto;
+  inline-size: 100vw;
+  max-inline-size: 100vw;
+  max-block-size: 88dvh;
+  border-radius: 1.25rem 1.25rem 0 0;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 0;
+  overflow-y: auto;
+}
+
+dialog.workspace-menu-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  margin: auto auto 0 auto;
+  inline-size: 100vw;
+  max-inline-size: 100vw;
+  max-block-size: 86dvh;
+  border-radius: 1.25rem 1.25rem 0 0;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 0;
+  overflow-y: auto;
+}
+
+@media (min-width: 640px) {
+  dialog.calendar-picker-dialog[open] {
+    margin: auto;
+    inline-size: min(92vw, 23rem);
+    max-inline-size: 92vw;
+    border-radius: 1rem;
+  }
+
+  dialog.workspace-menu-dialog[open] {
+    margin: auto;
+    inline-size: min(94vw, 28rem);
+    max-inline-size: 94vw;
+    border-radius: 1rem;
+  }
+}
+
 /* Native <details> disclosure animation (progressive enhancement per modern-web-guidance) */
 details > summary::-webkit-details-marker {
   display: none;

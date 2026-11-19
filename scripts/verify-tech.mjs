@@ -7,6 +7,7 @@ const root = "/Users/sabbisurendra/Downloads/Fitness";
 // 1. Verify TECH-SEC-01: No hardcoded tokens or secrets in src/
 const srcFiles = [
   "src/lib/types.ts",
+  "src/lib/brand.ts",
   "src/lib/nutritionDatabase.ts",
   "src/lib/routinesAndHabits.ts",
   "src/lib/workspaceStore.ts",
@@ -16,6 +17,7 @@ const srcFiles = [
   "src/app/api/gemini/route.ts",
   "src/components/FitnessDashboard.tsx",
   "src/components/OnboardingGateway.tsx",
+  "src/components/DatePickerDialog.tsx",
   "src/app/layout.tsx",
   "src/app/page.tsx",
   "src/app/u/[slug]/page.tsx",
@@ -502,7 +504,7 @@ for (const field of [
 assert(
   gatewayCode.includes("Launch My Private Space") &&
     gatewayCode.includes("tester-profile") &&
-    gatewayCode.includes("guest-pulse") &&
+    gatewayCode.includes("guest-fit") &&
     gatewayCode.includes("demo-tracker") &&
     gatewayCode.includes("anon-runner"),
   "OnboardingGateway includes 4 balanced privacy-friendly guest pools & CTA"
@@ -511,12 +513,59 @@ assert(
   dashboardCode.includes("1. Home") &&
     dashboardCode.includes("1. Favs") &&
     dashboardCode.includes("2. Food Search") &&
+    dashboardCode.includes("2. AI Coach") &&
+    dashboardCode.includes("Strength · Live") &&
+    dashboardCode.includes("Workspace, Backup & Sharing") &&
+    dashboardCode.includes("DatePickerDialog") &&
     dashboardCode.includes("My Private Link") &&
     dashboardCode.includes("Invite a Friend") &&
     dashboardCode.includes("My Spaces") &&
     dashboardCode.includes("Private Space Not Found") &&
     dashboardCode.includes("Same as Yesterday"),
-  "Mobile Screen-by-Screen v2 redesign & Stage 1 link safety controls present in FitnessDashboard"
+  "Mobile Screen-by-Screen v2 redesign, consolidated workspace menu, DatePickerDialog, and Stage 1 link safety controls present in FitnessDashboard"
+);
+
+// 8. Verify Brand & Competitor Hygiene + Backwards-Compatible Storage Keys
+const brandCleanFiles = [
+  "src/app/layout.tsx",
+  "src/app/page.tsx",
+  "src/components/OnboardingGateway.tsx",
+  "src/components/FitnessDashboard.tsx",
+  "src/components/DatePickerDialog.tsx",
+];
+for (const rel of brandCleanFiles) {
+  const fileText = fs.readFileSync(path.join(root, rel), "utf-8");
+  assert(
+    !/pulseloop|whoop|gemini ai|gemini 4|stateful gemini|gemini-4-hydrogen<\/option>|gemini-4-argon<\/option>/i.test(
+      fileText
+    ),
+    `Disallowed brand/competitor/model string found in ${rel}`
+  );
+}
+
+assert(
+  routinesAndHabitsCode.includes("Morning HRV / Resting HR Check") &&
+    !/pulse/i.test(routinesAndHabitsCode),
+  "routinesAndHabits.ts uses Morning HRV / Resting HR Check without Pulse"
+);
+
+const homePageCode = fs.readFileSync(
+  path.join(root, "src/app/page.tsx"),
+  "utf-8"
+);
+assert(
+  !homePageCode.includes("Loading PulseLoop"),
+  "src/app/page.tsx renders SSR OnboardingGateway without Loading PulseLoop fallback"
+);
+
+const localSpacesCode = fs.readFileSync(
+  path.join(root, "src/lib/localSpaces.ts"),
+  "utf-8"
+);
+assert(
+  localSpacesCode.includes("pulse-loop-active-slug") &&
+    localSpacesCode.includes("pulse-loop-saved-spaces"),
+  "localStorage keys in localSpaces.ts remain backwards-compatible"
 );
 
 console.log("ALL TECH-TESTER INVARIANTS PASSED!");

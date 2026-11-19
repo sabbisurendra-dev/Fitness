@@ -147,7 +147,7 @@ function buildFallbackPrescription(
   return {
     headline:
       analysis.verdictLevel === "optimal"
-        ? `Maintain Peak Loop (${analysis.readinessScore}% Readiness)`
+        ? `Maintain Peak Recovery (${analysis.readinessScore}% Readiness)`
         : `Close ${sleepGap > 0 ? `${sleepGap}h Sleep` : "Fueling"} Gap for Strain ${analysis.strainScore}/21`,
     summary: analysis.verdictExplanation,
     actionItems: [
@@ -402,7 +402,7 @@ export async function POST(req: NextRequest) {
 
     if (!["optimize-day", "smart-log", "coach", "food-search"].includes(mode)) {
       return NextResponse.json(
-        { error: "Unsupported Gemini interaction mode." },
+        { error: "Unsupported AI interaction mode." },
         { status: 400 }
       );
     }
@@ -443,7 +443,7 @@ export async function POST(req: NextRequest) {
     const buildFallbackResponse = (reason?: "rate-limited" | "offline") => {
       const rateNote =
         reason === "rate-limited"
-          ? "Live Gemini quota reached for this hour — switched seamlessly to instant local engine."
+          ? "Live AI quota reached for this hour — switched seamlessly to instant local engine."
           : undefined;
       if (mode === "food-search") {
         return NextResponse.json({
@@ -627,7 +627,7 @@ export async function POST(req: NextRequest) {
         const interaction = await client.interactions.create({
           model: activeModel,
           system_instruction:
-            "You are an elite clinical sports physiologist and recovery coach inside PulseLoop Fitness. Analyze the athlete's real-time workout strain, nutrition macros, and sleep architecture, then prescribe concrete recovery steps, one optimal recovery meal, and one accessory/recovery exercise matching their exact weight unit.",
+            "You are an elite clinical sports physiologist and AI recovery coach inside My Fitness. Analyze the athlete's real-time workout strain, nutrition macros, and sleep architecture, then prescribe concrete recovery steps, one optimal recovery meal, and one accessory/recovery exercise matching their exact weight unit. Never reference third-party wearable or fitness app brands (such as WHOOP, Oura, Garmin, Apple Watch, or Fitbit) unless the user mentions them first.",
           input: `Analyze this daily telemetry for workspace /u/${slug} on ${date} and return a recovery prescription:\n\n${telemetryContext}`,
           response_format: {
             type: "text",
@@ -720,7 +720,7 @@ export async function POST(req: NextRequest) {
       if (mode === "smart-log") {
         const interaction = await client.interactions.create({
           model: activeModel,
-          system_instruction: `You are a structured fitness, nutrition, and sleep log parser for PulseLoop (/u/${slug}). Convert the user's natural language into structured exercises (${profile?.weightUnit || "kg"}), meals (kcal/protein/carbs/fats), and numeric deltas for sleepHoursDelta, deepSleepHoursDelta, gymMinutesDelta, and cardioMinutesDelta (default deltas to 0 if not mentioned).`,
+          system_instruction: `You are a structured fitness, nutrition, and sleep log parser for My Fitness (/u/${slug}). Convert the user's natural language into structured exercises (${profile?.weightUnit || "kg"}), meals (kcal/protein/carbs/fats), and numeric deltas for sleepHoursDelta, deepSleepHoursDelta, gymMinutesDelta, and cardioMinutesDelta (default deltas to 0 if not mentioned). Never mention third-party wearable brands.`,
           input: `Current athlete context:\n${telemetryContext}\n\nNatural-language log input to parse:\n"${prompt}"`,
           response_format: {
             type: "text",
@@ -805,7 +805,7 @@ export async function POST(req: NextRequest) {
       const interaction = await client.interactions.create({
         model: activeModel,
         system_instruction:
-          "You are the PulseLoop AI Performance Coach embedded directly inside the athlete's live workspace URL. Give concise, practical, evidence-based guidance grounded in their current strain, sleep architecture, and nutrition numbers. Use short bullet points when recommending adjustments.",
+          "You are the AI Recovery & Performance Coach embedded directly inside the athlete's private Fitness Hub. Give concise, practical, evidence-based guidance grounded in their current strain, sleep architecture, and nutrition numbers. Use short bullet points when recommending adjustments. Never mention third-party wearable or fitness app brands unless the user brings them up first.",
         input: `Latest workspace telemetry (/u/${slug}, ${date}):\n${telemetryContext}\n\nAthlete question: ${prompt}`,
         ...(previousInteractionId
           ? { previous_interaction_id: previousInteractionId }
@@ -845,7 +845,7 @@ export async function POST(req: NextRequest) {
     }
   } catch (err) {
     return NextResponse.json(
-      { error: "Failed to process Gemini request", detail: String(err) },
+      { error: "Failed to process AI request", detail: String(err) },
       { status: 500 }
     );
   }

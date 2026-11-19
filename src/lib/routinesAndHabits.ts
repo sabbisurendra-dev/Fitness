@@ -374,7 +374,7 @@ export const HABIT_CATALOG: HabitDefinition[] = [
   { id: "joint-warmup-prep", name: "Full Joint Warm-Up Completed", category: "Recovery", inputType: "yes_no" },
   { id: "physio-rehab-drills", name: "Physio / Prehab Drills", category: "Recovery", inputType: "yes_no" },
   { id: "neck-back-decompression", name: "Spine & Neck Decompression", category: "Recovery", inputType: "yes_no" },
-  { id: "hrv-morning-check", name: "Morning HRV / Pulse Check", category: "Recovery", inputType: "yes_no" },
+  { id: "hrv-morning-check", name: "Morning HRV / Resting HR Check", category: "Recovery", inputType: "yes_no" },
   { id: "low-stress-evening", name: "Low-Stress Recovery Evening", category: "Recovery", inputType: "yes_no" },
   { id: "soreness-doms-high", name: "High Muscle Soreness (DOMS)", category: "Recovery", inputType: "yes_no" },
 

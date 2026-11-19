@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   ArrowRight,
@@ -26,14 +26,14 @@ import {
 
 const GUEST_POOLS = {
   tester: ["tester-profile", "test-profile", "test-user"],
-  guest: ["tester-random", "guest-pulse", "guest-athlete"],
+  guest: ["tester-random", "guest-fit", "guest-athlete"],
   demo: ["demo-tracker", "demo-fitness", "sandbox-fit"],
-  stealth: ["anon-runner", "stealth-lifter", "private-loop"],
+  stealth: ["anon-runner", "stealth-lifter", "private-fit"],
 } as const;
 
 const INITIAL_SSR_SUGGESTIONS = [
   { style: "Tester", handle: "tester-profile-4821" },
-  { style: "Guest", handle: "guest-pulse-829" },
+  { style: "Guest", handle: "guest-fit-829" },
   { style: "Demo", handle: "demo-tracker-942" },
   { style: "Stealth", handle: "anon-runner-318" },
 ];
@@ -65,11 +65,16 @@ function previewPrefix(raw: string): string {
   return cleaned || "your-name";
 }
 
-export default function OnboardingGateway() {
+const DEFAULT_HOST_DISPLAY =
+  (process.env.NEXT_PUBLIC_APP_URL || "").replace(/^https?:\/\//, "") ||
+  "my-fitness.app";
+
+export default function OnboardingGateway({
+  suppressAutoRedirect = false,
+}: {
+  suppressAutoRedirect?: boolean;
+}) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const suppressAutoRedirect =
-    searchParams.get("new") === "1" || searchParams.get("choose") === "1";
 
   const [checkingRedirect, setCheckingRedirect] = useState(true);
   const [resumingSlug, setResumingSlug] = useState<string | null>(null);
@@ -85,7 +90,7 @@ export default function OnboardingGateway() {
   const [existingInput, setExistingInput] = useState("");
   const [checkingExisting, setCheckingExisting] = useState(false);
   const [existingError, setExistingError] = useState("");
-  const [hostDisplay, setHostDisplay] = useState("pulse-loop-fitness.vercel.app");
+  const [hostDisplay, setHostDisplay] = useState(DEFAULT_HOST_DISPLAY);
 
   // Sync theme with <meta name="color-scheme">
   useEffect(() => {
@@ -115,7 +120,7 @@ export default function OnboardingGateway() {
   // Auto-redirect returning visitors unless escape hatch (?new=1 or ?choose=1) is present
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setHostDisplay(window.location.host || "pulse-loop-fitness.vercel.app");
+      setHostDisplay(window.location.host || DEFAULT_HOST_DISPLAY);
     }
     setSuggestions(generateBalancedSuggestions());
     const spaces = getSavedSpaces();
@@ -255,7 +260,10 @@ export default function OnboardingGateway() {
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
               <Activity className="h-4 w-4" aria-hidden="true" />
             </div>
-            <span className="font-bold tracking-tight text-base">PulseLoop</span>
+            <span className="font-semibold tracking-tight text-base">My Fitness</span>
+            <span className="hidden sm:inline text-xs text-[var(--text-muted)]">
+              · Training, Fuel &amp; Recovery
+            </span>
           </div>
 
           <button
@@ -341,7 +349,7 @@ export default function OnboardingGateway() {
               id="welcome-heading"
               className="text-xl sm:text-2xl font-extrabold tracking-tight"
             >
-              Your private PulseLoop dashboard — no signup or password needed.
+              Your private Fitness Hub — no signup or password needed.
             </h1>
             <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
               Enter your name or pick a random guest alias below. We&apos;ll generate a unique private URL that saves your workouts, meals, sleep, and habits across days.
@@ -511,7 +519,7 @@ export default function OnboardingGateway() {
         </section>
 
         <p className="text-center text-[11px] text-[var(--text-muted)]">
-          Mobile-first closed-loop Workouts · Nutrition · Sleep · Habits Journal
+          Mobile-first Fitness Log · Workouts · Nutrition · Sleep · Daily Journal
         </p>
       </main>
     </div>

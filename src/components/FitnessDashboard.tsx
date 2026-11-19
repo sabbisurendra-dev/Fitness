@@ -55,7 +55,10 @@ import {
   LayoutGrid,
   Smartphone,
   Link2,
+  MoreHorizontal,
 } from "lucide-react";
+import { DatePickerDialog, shiftIsoDate } from "@/components/DatePickerDialog";
+import { EXPORT_FILE_PREFIX, getAiTierLabel } from "@/lib/brand";
 import {
   UserProfileStore,
   DailyEntry,
@@ -242,10 +245,8 @@ export default function FitnessDashboard({
   const [moreSubPage, setMoreSubPage] = useState<MoreSubPage>("journal");
   const [desktopFullView, setDesktopFullView] = useState(false);
 
-  // Header Privacy & Space Panels
-  const [openHeaderPanel, setOpenHeaderPanel] = useState<
-    null | "private-link" | "my-spaces"
-  >(null);
+  // Header Workspace, Backup & Sharing Dialog
+  const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
   const [savedSpaces, setSavedSpaces] = useState<SavedSpaceRecord[]>([]);
   const [existingSpaceInput, setExistingSpaceInput] = useState("");
   const [existingSpaceError, setExistingSpaceError] = useState("");
@@ -291,7 +292,7 @@ export default function FitnessDashboard({
   const [stapleQuantities, setStapleQuantities] = useState<Record<string, number>>({});
   const [lastSavedTimeLabel, setLastSavedTimeLabel] = useState<string>("");
 
-  // Workout Dual Timers (WHOOP 5.0 Strength Trainer) + Accordion
+  // Workout Dual Timers (Strength Trainer) + Accordion
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [currentHour, setCurrentHour] = useState<number>(12);
   const [liveElapsedSeconds, setLiveElapsedSeconds] = useState<number>(0);
@@ -308,7 +309,7 @@ export default function FitnessDashboard({
   const [quickFoodCalories, setQuickFoodCalories] = useState<number>(0);
   const [quickFoodProtein, setQuickFoodProtein] = useState<number>(0);
 
-  // WHOOP 5.0 100-Habit Catalog Dialog
+  // 100-Habit Catalog Dialog
   const [showHabitCatalogDialog, setShowHabitCatalogDialog] = useState(false);
   const [habitSearchQuery, setHabitSearchQuery] = useState("");
   const [habitCategoryFilter, setHabitCategoryFilter] = useState<"All" | HabitCategory>("All");
@@ -318,6 +319,8 @@ export default function FitnessDashboard({
   const [customHabitDefault, setCustomHabitDefault] = useState("5");
   const [customHabitCategory, setCustomHabitCategory] = useState<HabitCategory>("Supplements");
 
+  const workspaceMenuDialogRef = useRef<HTMLDialogElement | null>(null);
+  const workspacePressedOutsideRef = useRef(false);
   const habitCatalogDialogRef = useRef<HTMLDialogElement | null>(null);
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -696,9 +699,7 @@ export default function FitnessDashboard({
   );
 
   const shiftDate = (daysDelta: number) => {
-    const dt = new Date(`${selectedDate}T12:00:00`);
-    dt.setDate(dt.getDate() + daysDelta);
-    setSelectedDate(dt.toISOString().slice(0, 10));
+    setSelectedDate((prev) => shiftIsoDate(prev, daysDelta));
   };
 
   // Private Link, Invite a Friend, WhatsApp & Backup handlers
@@ -710,7 +711,7 @@ export default function FitnessDashboard({
   const getMasterInviteUrl = () =>
     typeof window !== "undefined"
       ? window.location.origin
-      : "https://pulse-loop-fitness.vercel.app";
+      : process.env.NEXT_PUBLIC_APP_URL || "";
 
   const handleCopyPrivateLink = async () => {
     const ok = await copyTextToClipboard(
@@ -731,7 +732,7 @@ export default function FitnessDashboard({
   };
 
   const getWhatsAppPrivateHref = () => {
-    const text = `My private PulseLoop Fitness link (${profile.displayName}): ${getPrivateUrl()}`;
+    const text = `My private Fitness Hub link (${profile.displayName}): ${getPrivateUrl()}`;
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
@@ -743,7 +744,7 @@ export default function FitnessDashboard({
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `pulseloop-${slug}-${selectedDate}.json`;
+      a.download = `${EXPORT_FILE_PREFIX}-${slug}-${selectedDate}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -783,7 +784,7 @@ export default function FitnessDashboard({
         isGuest: data.profile.isGuest,
       });
       setActiveSlug(parsedSlug);
-      setOpenHeaderPanel(null);
+      setShowWorkspaceMenu(false);
       router.push(`/u/${parsedSlug}`);
     } catch {
       setErr("Unable to verify that link right now.");
@@ -791,7 +792,7 @@ export default function FitnessDashboard({
     }
   };
 
-  // Workout helpers (WHOOP 5.0 Strength Trainer + unique ID integrity)
+  // Workout helpers (Strength Trainer + unique ID integrity)
   const addExercise = (
     presetName = "",
     presetGroup = "Strength",
@@ -923,7 +924,7 @@ export default function FitnessDashboard({
     }));
     setLiveElapsedSeconds(0);
     setRestElapsedSeconds(0);
-    setWorkoutStatusBanner("WHOOP Strength session live — track sets and rest periods on this screen.");
+    setWorkoutStatusBanner("Session live — log sets & rest below.");
   };
 
   const toggleActiveSetState = () => {
@@ -1500,7 +1501,7 @@ export default function FitnessDashboard({
     setQuickFoodProtein(0);
   };
 
-  // WHOOP 5.0 Journal Habit handlers
+  // Daily Journal Habit handlers
   const updateHabitEntry = (
     habitId: string,
     patch: Partial<DailyHabitEntry> | null
@@ -1527,9 +1528,7 @@ export default function FitnessDashboard({
   };
 
   const applySameHabitsAsYesterday = () => {
-    const dt = new Date(`${selectedDate}T12:00:00`);
-    dt.setDate(dt.getDate() - 1);
-    const yesterdayStr = dt.toISOString().slice(0, 10);
+    const yesterdayStr = shiftIsoDate(selectedDate, -1);
     const prevDates = Object.keys(profile.days)
       .filter((d) => d < selectedDate && profile.days[d]?.habitLogs && Object.keys(profile.days[d].habitLogs || {}).length > 0)
       .sort((a, b) => b.localeCompare(a));
@@ -1651,11 +1650,11 @@ export default function FitnessDashboard({
       }));
       setGeminiStatusMessage(
         data.statusNote ||
-          `Gemini (${data.model || geminiModel}) generated prescription: ${prescription.headline}`
+          `AI Coach (${getAiTierLabel(data.model || geminiModel)}) generated prescription: ${prescription.headline}`
       );
     } catch (err) {
       setGeminiStatusMessage(
-        err instanceof Error ? err.message : "Failed to run Gemini optimizer."
+        err instanceof Error ? err.message : "Failed to run AI recovery optimizer."
       );
     } finally {
       setGeminiLoadingMode(null);
@@ -1673,7 +1672,7 @@ export default function FitnessDashboard({
       protein: Math.max(0, Math.round(Number(meal.protein) || 0)),
       carbs: Math.max(0, Math.round(Number(meal.carbs) || 0)),
       fats: Math.max(0, Math.round(Number(meal.fats) || 0)),
-      note: meal.note || "Added from Gemini Prescription",
+      note: meal.note || "Added from AI Coach Prescription",
     };
 
     updateCurrentDay((d) => ({
@@ -1712,7 +1711,7 @@ export default function FitnessDashboard({
       name: ex.name,
       muscleGroup: ex.muscleGroup || "Strength",
       sets,
-      note: ex.note || "Added from Gemini Prescription",
+      note: ex.note || "Added from AI Coach Prescription",
     };
     updateCurrentDay((d) => ({
       ...d,
@@ -1888,7 +1887,7 @@ export default function FitnessDashboard({
     e.preventDefault();
     const promptText = coachInput.trim();
     if (!promptText) {
-      setCoachError("Enter a question for your Gemini coach.");
+      setCoachError("Enter a question for your AI Coach.");
       coachTextareaRef.current?.focus();
       return;
     }
@@ -1915,7 +1914,7 @@ export default function FitnessDashboard({
       });
       const data = await res.json();
       if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Gemini coach request failed.");
+        throw new Error(data?.error || "AI Coach request failed.");
       }
 
       const nowIso = new Date().toISOString();
@@ -1944,11 +1943,12 @@ export default function FitnessDashboard({
         },
       }));
       setGeminiStatusMessage(
-        data.statusNote || `Gemini coach (${data.model || geminiModel}) replied.`
+        data.statusNote ||
+          `AI Coach (${getAiTierLabel(data.model || geminiModel)}) replied.`
       );
     } catch (err) {
       setCoachError(
-        err instanceof Error ? err.message : "Failed to reach Gemini coach."
+        err instanceof Error ? err.message : "Failed to reach AI Coach."
       );
     } finally {
       setGeminiLoadingMode(null);
@@ -1964,7 +1964,7 @@ export default function FitnessDashboard({
         messages: [],
       },
     }));
-    setGeminiStatusMessage("Started a fresh Gemini Interactions thread.");
+    setGeminiStatusMessage("Started a fresh AI Coach thread.");
   };
 
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
@@ -1996,6 +1996,14 @@ export default function FitnessDashboard({
     [profile.days]
   );
 
+  const loggedDates = useMemo(() => {
+    const s = new Set<string>();
+    for (const [d, entry] of Object.entries(profile.days)) {
+      if (isDailyEntryLogged(entry)) s.add(d);
+    }
+    return s;
+  }, [profile.days]);
+
   const lastWeightRef = useMemo(
     () => findLastBodyMetricEntry(profile, selectedDate, "weight"),
     [profile, selectedDate]
@@ -2005,7 +2013,7 @@ export default function FitnessDashboard({
     [profile, selectedDate]
   );
 
-  // Muscular Load vs Cardio Load split (WHOOP 5.0 Strength Trainer)
+  // Muscular Load vs Cardio Load split (Strength Trainer)
   const muscularLoadPct = useMemo(() => {
     const strengthSignal = analysis.totalSets * 8 + analysis.totalVolume / 220;
     const cardioSignal = (Number(currentDay.workout.cardioMinutes) || 0) * 3.5;
@@ -2079,6 +2087,17 @@ export default function FitnessDashboard({
       dlg.close();
     }
   }, [showHabitCatalogDialog]);
+
+  // Sync native <dialog> for Workspace, Backup & Sharing Menu
+  useEffect(() => {
+    const dlg = workspaceMenuDialogRef.current;
+    if (!dlg) return;
+    if (showWorkspaceMenu && !dlg.open) {
+      dlg.showModal();
+    } else if (!showWorkspaceMenu && dlg.open) {
+      dlg.close();
+    }
+  }, [showWorkspaceMenu]);
 
   // Dual live workout & between-set rest timer ticker (resilient across reloads)
   useEffect(() => {
@@ -2336,90 +2355,15 @@ export default function FitnessDashboard({
               </div>
             </div>
 
-            {/* Right Controls: Date + My Private Link + Invite a Friend + My Spaces + Theme */}
+            {/* Right Controls: Date Picker + Theme + Consolidated Workspace Menu */}
             <div className="flex flex-wrap items-center gap-1.5">
-              {/* Compact Date Picker */}
-              <div className="inline-flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1 py-0.5">
-                <button
-                  type="button"
-                  onClick={() => shiftDate(-1)}
-                  aria-label="Previous Day"
-                  className="rounded p-1 hover:bg-[var(--bg-surface)] transition"
-                >
-                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-                <input
-                  type="date"
-                  aria-label="Selected Log Date"
-                  value={selectedDate}
-                  onChange={(e) =>
-                    e.target.value && setSelectedDate(e.target.value)
-                  }
-                  className="bg-transparent px-1 text-[11px] font-semibold focus:outline-none w-[108px]"
-                />
-                <button
-                  type="button"
-                  onClick={() => shiftDate(1)}
-                  aria-label="Next Day"
-                  className="rounded p-1 hover:bg-[var(--bg-surface)] transition"
-                >
-                  <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-                {selectedDate !== todayStr && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedDate(todayStr)}
-                    className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-400"
-                  >
-                    Today
-                  </button>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setOpenHeaderPanel((p) =>
-                    p === "private-link" ? null : "private-link"
-                  )
-                }
-                aria-expanded={openHeaderPanel === "private-link"}
-                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition ${
-                  openHeaderPanel === "private-link"
-                    ? "border-emerald-500 bg-emerald-500/15 text-emerald-400"
-                    : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-emerald-500/40"
-                }`}
-              >
-                <Lock className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-                <span>My Private Link</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => void handleInviteFriend()}
-                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/20 transition"
-              >
-                <Share2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Invite a Friend</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setOpenHeaderPanel((p) =>
-                    p === "my-spaces" ? null : "my-spaces"
-                  )
-                }
-                aria-expanded={openHeaderPanel === "my-spaces"}
-                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition ${
-                  openHeaderPanel === "my-spaces"
-                    ? "border-indigo-500 bg-indigo-500/15 text-indigo-400"
-                    : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-indigo-500/40"
-                }`}
-              >
-                <UserCheck className="h-3.5 w-3.5 text-indigo-400" aria-hidden="true" />
-                <span>My Spaces</span>
-              </button>
+              <DatePickerDialog
+                selectedDate={selectedDate}
+                todayStr={todayStr}
+                loggedDates={loggedDates}
+                onSelectDate={setSelectedDate}
+                onShiftDate={shiftDate}
+              />
 
               <button
                 type="button"
@@ -2429,7 +2373,7 @@ export default function FitnessDashboard({
                     ? "Switch to light mode"
                     : "Switch to dark mode"
                 }
-                className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium hover:border-emerald-500/40 transition"
+                className="inline-flex min-h-[40px] items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-[11px] font-medium hover:border-emerald-500/40 transition"
               >
                 {colorSchemeOverride === "dark" ? (
                   <>
@@ -2447,7 +2391,7 @@ export default function FitnessDashboard({
               <button
                 type="button"
                 onClick={() => setDesktopFullView((v) => !v)}
-                className="hidden lg:inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+                className="hidden lg:inline-flex min-h-[40px] items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
                 title="Switch between Screen-by-Screen view and Full Desktop Overview"
               >
                 {desktopFullView ? (
@@ -2462,6 +2406,18 @@ export default function FitnessDashboard({
                   </>
                 )}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowWorkspaceMenu(true)}
+                aria-label="Workspace, Backup & Sharing"
+                title="Workspace, Backup & Sharing"
+                aria-haspopup="dialog"
+                aria-expanded={showWorkspaceMenu}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-emerald-500/40 transition"
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+              </button>
             </div>
           </div>
 
@@ -2475,167 +2431,6 @@ export default function FitnessDashboard({
           >
             {copyStatusText}
           </div>
-
-          {/* On-Demand Panel 1: My Private Link */}
-          {openHeaderPanel === "private-link" && (
-            <div className="rounded-xl border border-emerald-500/35 bg-[var(--bg-elevated)] p-3 space-y-2.5 text-xs">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="font-bold text-emerald-400 flex items-center gap-1.5">
-                    <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Private edit link — keep for your own devices only.</span>
-                  </div>
-                  <div className="mt-0.5 font-mono text-[11px] break-all text-[var(--text-muted)]">
-                    {getPrivateUrl()}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setOpenHeaderPanel(null)}
-                  aria-label="Close My Private Link panel"
-                  className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                >
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleCopyPrivateLink()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
-                >
-                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Copy Private Link</span>
-                </button>
-                <a
-                  href={getWhatsAppPrivateHref()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={() => {
-                    dismissLinkNudge(slug);
-                    setLinkNudgeDismissed(true);
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
-                >
-                  <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Send to My WhatsApp</span>
-                </a>
-                <button
-                  type="button"
-                  onClick={handleDownloadJsonBackup}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-semibold hover:border-emerald-500/40 transition"
-                >
-                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Download JSON Backup</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* On-Demand Panel 2: My Spaces */}
-          {openHeaderPanel === "my-spaces" && (
-            <div className="rounded-xl border border-indigo-500/35 bg-[var(--bg-elevated)] p-3 space-y-3 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-bold text-indigo-400">
-                  Spaces Saved on This Device
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => router.push("/?new=1")}
-                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-indigo-400 transition"
-                  >
-                    <Plus className="h-3 w-3" aria-hidden="true" />
-                    <span>Create New Space</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOpenHeaderPanel(null)}
-                    aria-label="Close My Spaces panel"
-                    className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  >
-                    <X className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                </div>
-              </div>
-
-              {savedSpaces.length > 0 && (
-                <div className="grid gap-1.5 sm:grid-cols-2">
-                  {savedSpaces.map((sp) => {
-                    const isCurrent = sp.slug === slug;
-                    return (
-                      <button
-                        key={sp.slug}
-                        type="button"
-                        onClick={() => {
-                          setOpenHeaderPanel(null);
-                          if (!isCurrent) {
-                            setActiveSlug(sp.slug);
-                            router.push(`/u/${sp.slug}`);
-                          }
-                        }}
-                        className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${
-                          isCurrent
-                            ? "border-emerald-500/50 bg-emerald-500/10"
-                            : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-indigo-400/50"
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="font-bold truncate">{sp.displayName}</div>
-                          <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
-                            /u/{sp.slug}
-                          </div>
-                        </div>
-                        <span className="shrink-0 text-[10px] font-bold text-emerald-400">
-                          {isCurrent ? "Active" : "Switch →"}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void handleVerifyAndOpenSpace(
-                    existingSpaceInput,
-                    setExistingSpaceError,
-                    setCheckingSpaceLink
-                  );
-                }}
-                className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2.5"
-              >
-                <Link2 className="h-3.5 w-3.5 text-sky-400 shrink-0" aria-hidden="true" />
-                <input
-                  type="text"
-                  aria-label="Open an existing private link"
-                  autoCorrect="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  placeholder="Open existing link or slug..."
-                  value={existingSpaceInput}
-                  onChange={(e) => {
-                    setExistingSpaceInput(e.target.value);
-                    setExistingSpaceError("");
-                  }}
-                  className="flex-1 min-w-[160px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs font-mono"
-                />
-                <button
-                  type="submit"
-                  disabled={checkingSpaceLink}
-                  className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-sky-400 disabled:opacity-60"
-                >
-                  {checkingSpaceLink ? "Checking..." : "Open Link"}
-                </button>
-                {existingSpaceError && (
-                  <p role="alert" className="w-full text-[11px] font-medium text-rose-400">
-                    {existingSpaceError}
-                  </p>
-                )}
-              </form>
-            </div>
-          )}
         </div>
 
         {/* Cross-Tab Active Workout Mini-Bar (Visible whenever timer is running & user switches screens) */}
@@ -3112,7 +2907,7 @@ export default function FitnessDashboard({
                       {isTodayBlank
                         ? "Ready to Log Today"
                         : analysis.verdictLevel === "optimal"
-                        ? "Optimal Recovery Loop"
+                        ? "Optimal Recovery"
                         : analysis.verdictLevel === "moderate"
                         ? "Borderline Sufficiency"
                         : "Recovery / Fueling Deficit"}
@@ -3423,11 +3218,11 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            SCREEN 2: WORKOUTS — WHOOP 5.0 STRENGTH TRAINER
+            SCREEN 2: WORKOUTS — STRENGTH TRAINER
            ========================================================= */}
         {showWorkouts && (
           <section aria-label="Workouts Screen" className="space-y-3">
-            {/* Pinned Same-Screen WHOOP 5.0 Live Activity HUD */}
+            {/* Pinned Same-Screen Live Activity HUD */}
             {isWorkoutLive ? (
               <div className="rounded-2xl border border-emerald-500/50 bg-emerald-500/10 p-3.5 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3436,7 +3231,7 @@ export default function FitnessDashboard({
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                          WHOOP Strength Live
+                          Strength · Live
                         </span>
                         <span className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-bold text-amber-400 tabular-nums">
                           {currentDay.workout.inSetActive
@@ -3505,7 +3300,7 @@ export default function FitnessDashboard({
                   </div>
                   <div className="min-w-0">
                     <h2 className="text-sm sm:text-base font-bold truncate">
-                      {currentDay.workout.sessionTitle || "Workouts · WHOOP Strength"}
+                      {currentDay.workout.sessionTitle || "Workouts · Strength"}
                     </h2>
                     <div className="text-[11px] text-[var(--text-muted)]">
                       {analysis.totalSets} sets · {analysis.totalVolume.toLocaleString()}{" "}
@@ -3977,7 +3772,7 @@ export default function FitnessDashboard({
                             </div>
                           )}
 
-                          {/* WHOOP 5.0 Set Table: Type (W/1/2/F) | Weight | Reps | Done */}
+                          {/* Set Table: Type (W/1/2/F) | Weight | Reps | Done */}
                           <div className="space-y-1.5">
                             <div className="grid grid-cols-[2.4rem_1fr_4.2rem_3.6rem] items-center gap-1.5 border-b border-[var(--border-subtle)] pb-1 text-[10px] font-semibold text-[var(--text-muted)]">
                               <span>Type</span>
@@ -5036,7 +4831,7 @@ export default function FitnessDashboard({
         )}
 
         {/* =========================================================
-            SCREEN 4: HABITS (WHOOP 5.0 JOURNAL), GEMINI AI & TRENDS
+            SCREEN 4: HABITS JOURNAL, AI COACH & TRENDS
            ========================================================= */}
         {showMore && (
           <section aria-label="Habits, AI Coach and Trends" className="space-y-3">
@@ -5052,7 +4847,7 @@ export default function FitnessDashboard({
                       id: "journal",
                       label: `1. Journal (${loggedHabitsCount}/${activeHabits.length})`,
                     },
-                    { id: "ai", label: "2. Gemini AI" },
+                    { id: "ai", label: "2. AI Coach" },
                     { id: "trends", label: "3. History & Trends" },
                   ] as const
                 ).map((p) => (
@@ -5074,7 +4869,7 @@ export default function FitnessDashboard({
               </div>
             )}
 
-            {/* SUB-PAGE 4A: WHOOP 5.0 DAILY JOURNAL */}
+            {/* SUB-PAGE 4A: DAILY JOURNAL */}
             {(desktopFullView || moreSubPage === "journal") && (
               <div className="space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -5084,7 +4879,7 @@ export default function FitnessDashboard({
                       answered
                     </h2>
                     <p className="text-[11px] text-[var(--text-muted)]">
-                      WHOOP-style behaviors mapped to next-day Recovery
+                      Daily habits mapped to next-day recovery
                     </p>
                   </div>
                   <button
@@ -5163,7 +4958,7 @@ export default function FitnessDashboard({
                             </div>
                           </div>
 
-                          {/* WHOOP 5.0 NO | YES Segmented Toggle */}
+                          {/* NO | YES Segmented Toggle */}
                           <div className="inline-flex rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-0.5 shrink-0">
                             <button
                               type="button"
@@ -5261,27 +5056,27 @@ export default function FitnessDashboard({
               </div>
             )}
 
-            {/* SUB-PAGE 4B: GEMINI 4 INTERACTIONS AI HUB */}
+            {/* SUB-PAGE 4B: AI RECOVERY COACH & SMART LOG */}
             {(desktopFullView || moreSubPage === "ai") && (
               <div className="rounded-2xl border border-emerald-500/30 bg-[var(--bg-surface)] p-4 space-y-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Sparkles className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                    <h2 className="text-sm font-bold">Gemini 4 Recovery &amp; Smart Log</h2>
+                    <h2 className="text-sm font-bold">AI Recovery Coach &amp; Smart Log</h2>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <select
-                      aria-label="Gemini 4 Model"
+                      aria-label="AI Coach Speed Mode"
                       value={geminiModel}
                       onChange={(e) =>
                         setGeminiModel(
                           e.target.value as "gemini-4-hydrogen" | "gemini-4-argon"
                         )
                       }
-                      className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[11px] font-mono"
+                      className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-xs font-semibold"
                     >
-                      <option value="gemini-4-hydrogen">gemini-4-hydrogen</option>
-                      <option value="gemini-4-argon">gemini-4-argon</option>
+                      <option value="gemini-4-hydrogen">Fast</option>
+                      <option value="gemini-4-argon">Deep</option>
                     </select>
                     <button
                       type="button"
@@ -5394,7 +5189,7 @@ export default function FitnessDashboard({
                         className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-400"
                       >
                         <Bot className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Stateful Gemini Coach</span>
+                        <span>AI Recovery Coach</span>
                       </label>
                       {(currentDay.aiCoach?.messages?.length || 0) > 0 && (
                         <button
@@ -5613,7 +5408,7 @@ export default function FitnessDashboard({
                         Strain-to-Sleep Sufficiency
                       </div>
                       <p>
-                        Connects WHOOP-style muscular strain (0–21) to required sleep hours, deep sleep repair, and 70 kg physiological HRV/RHR calibration without requiring expensive hardware.
+                        Connects daily muscular strain (0–21) to required sleep hours, deep sleep repair, and 70 kg physiological HRV/RHR calibration without requiring expensive hardware.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1">
@@ -5703,7 +5498,7 @@ export default function FitnessDashboard({
       )}
 
       {/* =========================================================
-          WHOOP-STYLE 100-HABIT CATALOG & CUSTOM TRACKER PICKER DIALOG
+          100-HABIT CATALOG & CUSTOM TRACKER PICKER DIALOG
          ========================================================= */}
       <dialog
         ref={habitCatalogDialogRef}
@@ -5915,6 +5710,249 @@ export default function FitnessDashboard({
           >
             Done ({activeHabits.length} Active)
           </button>
+        </div>
+      </dialog>
+
+      {/* =========================================================
+          CONSOLIDATED WORKSPACE, BACKUP & SHARING DIALOG
+         ========================================================= */}
+      <dialog
+        ref={workspaceMenuDialogRef}
+        aria-labelledby="workspace-menu-title"
+        {...({ closedby: "any" } as Record<string, string>)}
+        onCancel={(e) => {
+          e.preventDefault();
+          setShowWorkspaceMenu(false);
+        }}
+        onClose={() => {
+          if (workspaceMenuDialogRef.current) {
+            workspaceMenuDialogRef.current.returnValue = "";
+          }
+          setShowWorkspaceMenu(false);
+        }}
+        onPointerDown={(e) => {
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const dlg = workspaceMenuDialogRef.current;
+            if (!dlg) return;
+            const rect = dlg.getBoundingClientRect();
+            workspacePressedOutsideRef.current =
+              e.clientX < rect.left ||
+              e.clientX > rect.right ||
+              e.clientY < rect.top ||
+              e.clientY > rect.bottom;
+          }
+        }}
+        onPointerUp={(e) => {
+          if (
+            !("closedBy" in HTMLDialogElement.prototype) &&
+            workspacePressedOutsideRef.current
+          ) {
+            const dlg = workspaceMenuDialogRef.current;
+            if (dlg) {
+              const rect = dlg.getBoundingClientRect();
+              const outside =
+                e.clientX < rect.left ||
+                e.clientX > rect.right ||
+                e.clientY < rect.top ||
+                e.clientY > rect.bottom;
+              if (outside) setShowWorkspaceMenu(false);
+            }
+          }
+          workspacePressedOutsideRef.current = false;
+        }}
+        className="workspace-menu-dialog shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 px-4 py-3.5">
+          <div>
+            <h2 id="workspace-menu-title" className="text-sm sm:text-base font-bold">
+              Workspace, Backup &amp; Sharing
+            </h2>
+            <p className="text-[11px] text-[var(--text-muted)]">
+              Private capability link, device spaces, and JSON backup
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowWorkspaceMenu(false)}
+            aria-label="Close Workspace Menu"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4 text-xs">
+          {copyStatusText && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400"
+            >
+              {copyStatusText}
+            </div>
+          )}
+
+          {/* Section 1: My Private Link & Backup */}
+          <section aria-label="My Private Link and Backup" className="rounded-xl border border-emerald-500/35 bg-[var(--bg-elevated)] p-3 space-y-2.5">
+            <div>
+              <div className="font-bold text-emerald-400 flex items-center gap-1.5">
+                <Lock className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>My Private Link — keep for your own devices only</span>
+              </div>
+              <div className="mt-1 font-mono text-[11px] break-all text-[var(--text-muted)]">
+                {getPrivateUrl()}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleCopyPrivateLink()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Copy Private Link</span>
+              </button>
+              <a
+                href={getWhatsAppPrivateHref()}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => {
+                  dismissLinkNudge(slug);
+                  setLinkNudgeDismissed(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
+              >
+                <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Send to My WhatsApp</span>
+              </a>
+              <button
+                type="button"
+                onClick={handleDownloadJsonBackup}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-semibold hover:border-emerald-500/40 transition"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Download JSON Backup</span>
+              </button>
+            </div>
+          </section>
+
+          {/* Section 2: My Spaces */}
+          <section aria-label="My Spaces" className="rounded-xl border border-indigo-500/35 bg-[var(--bg-elevated)] p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold text-indigo-400 flex items-center gap-1.5">
+                <UserCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>My Spaces on This Device</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowWorkspaceMenu(false);
+                  router.push("/?new=1");
+                }}
+                className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-indigo-400 transition"
+              >
+                <Plus className="h-3 w-3" aria-hidden="true" />
+                <span>Create New Space</span>
+              </button>
+            </div>
+
+            {savedSpaces.length > 0 && (
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                {savedSpaces.map((sp) => {
+                  const isCurrent = sp.slug === slug;
+                  return (
+                    <button
+                      key={sp.slug}
+                      type="button"
+                      onClick={() => {
+                        setShowWorkspaceMenu(false);
+                        if (!isCurrent) {
+                          setActiveSlug(sp.slug);
+                          router.push(`/u/${sp.slug}`);
+                        }
+                      }}
+                      className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${
+                        isCurrent
+                          ? "border-emerald-500/50 bg-emerald-500/10"
+                          : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-indigo-400/50"
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-bold truncate">{sp.displayName}</div>
+                        <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
+                          /u/{sp.slug}
+                        </div>
+                      </div>
+                      <span className="shrink-0 text-[10px] font-bold text-emerald-400">
+                        {isCurrent ? "Active" : "Switch →"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleVerifyAndOpenSpace(
+                  existingSpaceInput,
+                  setExistingSpaceError,
+                  setCheckingSpaceLink
+                );
+              }}
+              className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2.5"
+            >
+              <Link2 className="h-3.5 w-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+              <input
+                type="text"
+                aria-label="Open an existing private link"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="Open existing link or slug..."
+                value={existingSpaceInput}
+                onChange={(e) => {
+                  setExistingSpaceInput(e.target.value);
+                  setExistingSpaceError("");
+                }}
+                className="flex-1 min-w-[160px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs font-mono"
+              />
+              <button
+                type="submit"
+                disabled={checkingSpaceLink}
+                className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-sky-400 disabled:opacity-60"
+              >
+                {checkingSpaceLink ? "Checking..." : "Open Link"}
+              </button>
+              {existingSpaceError && (
+                <p role="alert" className="w-full text-[11px] font-medium text-rose-400">
+                  {existingSpaceError}
+                </p>
+              )}
+            </form>
+          </section>
+
+          {/* Section 3: Invite a Friend */}
+          <section aria-label="Invite a Friend" className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="font-bold text-sky-400 flex items-center gap-1.5">
+                <Share2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Invite a Friend</span>
+              </div>
+              <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
+                Copies the fresh sign-up link so friends get their own private space without accessing yours.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleInviteFriend()}
+              className="shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-400 hover:bg-sky-500/20 transition"
+            >
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Copy Invite Link</span>
+            </button>
+          </section>
         </div>
       </dialog>
     </div>

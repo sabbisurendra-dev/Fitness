@@ -1,10 +1,21 @@
 import type { Metadata, Viewport } from "next";
+import { APP_DESCRIPTION, APP_NAME, APP_TITLE } from "@/lib/brand";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PulseLoop — Workouts, Nutrition & Sleep Sufficiency Hub",
-  description:
-    "Minimalist inline-first fitness tracker for gym workouts, macros/nutrition, and sleep recovery sufficiency.",
+  title: APP_TITLE,
+  description: APP_DESCRIPTION,
+  openGraph: {
+    title: APP_TITLE,
+    description: APP_DESCRIPTION,
+    siteName: APP_NAME,
+    type: "website",
+  },
+  twitter: {
+    card: "summary",
+    title: APP_TITLE,
+    description: APP_DESCRIPTION,
+  },
 };
 
 export const viewport: Viewport = {

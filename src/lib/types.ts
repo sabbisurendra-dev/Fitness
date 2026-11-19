@@ -247,7 +247,7 @@ export interface UserProfileStore {
 
 export interface SufficiencyAnalysis {
   readinessScore: number; // 0-100
-  strainScore: number; // 0-21 (WHOOP scale)
+  strainScore: number; // 0-21 training strain scale
   workoutIntensityScore: number; // 0-100
   effectiveWorkoutRating: number; // 1-10
   totalVolume: number;
@@ -432,7 +432,7 @@ export function calculateSufficiencyAnalysis(
 ): SufficiencyAnalysis {
   const { workout, nutrition, sleep } = entry;
 
-  // 1. Workout Volume & Strain Calculation (WHOOP / Garmin inspired)
+  // 1. Workout Volume & Strain Calculation (0-21 clinical exertion scale)
   let totalSets = 0;
   let totalReps = 0;
   let totalVolume = 0;
@@ -485,7 +485,7 @@ export function calculateSufficiencyAnalysis(
           )
         );
 
-  // 2. Strain-Adjusted Sleep Need (WHOOP / Oura clinical formula)
+  // 2. Strain-Adjusted Sleep Need (clinical sports-science formula)
   // Base sleep need + extra sleep required for gym strain & CNS load
   const strainSleepAddon =
     strainScore > 14 ? 0.8 : strainScore > 10 ? 0.5 : strainScore > 6 ? 0.25 : 0;

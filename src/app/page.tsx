@@ -1,16 +1,14 @@
-import React, { Suspense } from "react";
+import React from "react";
 import OnboardingGateway from "@/components/OnboardingGateway";
 
-export default function HomePage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen flex items-center justify-center text-xs text-[var(--text-muted)]">
-          Loading PulseLoop...
-        </div>
-      }
-    >
-      <OnboardingGateway />
-    </Suspense>
-  );
+interface HomePageProps {
+  searchParams?: Promise<{ new?: string; choose?: string }>;
+}
+
+export default async function HomePage({ searchParams }: HomePageProps) {
+  const params = searchParams ? await searchParams : undefined;
+  const suppressAutoRedirect =
+    params?.new === "1" || params?.choose === "1";
+
+  return <OnboardingGateway suppressAutoRedirect={suppressAutoRedirect} />;
 }
