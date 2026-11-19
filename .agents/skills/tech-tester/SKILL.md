@@ -114,3 +114,8 @@ Verify the mathematical and state invariants of `calculateSufficiencyAnalysis(en
   - **Check**: Verify `calculateSufficiencyAnalysis` factors `workout.workoutRating ?? entry.dailyWorkoutRating ?? workout.sessionRpe` into `strainScore` and `workoutIntensityScore` while preserving rest-day `2.0` strain and `<= 20.8` max strain bounds.
   - **Pass**: `node scripts/verify-tech.mjs` passes all existing and custom invariants.
   - **Fail**: Any invariant fails or breaks backward-compatible bounds.
+
+- **TECH-CUSTOM-04 (Stage 1 Cryptographic Capability URLs, Existence Semantics & Payload/Rate Guards)**:
+  - **Check**: Verify `/api/workspace/create` mints `<prefix>-<10-char-unambiguous-token>` using `crypto.randomBytes`, `/api/state` uses HMAC-SHA256 blob keys with legacy read fallback, `GET /api/state` returns `{ exists: false }` (HTTP `200`) for unknown slugs, `POST /api/state` rejects uncreated slugs (`404`) and payloads `> 768 KB` (`413`), and `/api/gemini` enforces hourly sliding-window rate limits with graceful local fallback.
+  - **Pass**: All API contracts, `next.config.mjs` privacy headers (`Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex, nofollow, noarchive`), and `/u/[slug]` `robots` metadata pass verification.
+  - **Fail**: Any uncreated slug can be written via `POST /api/state`, oversized payloads bypass `413`, or privacy headers are missing.

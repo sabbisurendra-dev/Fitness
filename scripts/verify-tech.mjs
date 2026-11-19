@@ -9,9 +9,13 @@ const srcFiles = [
   "src/lib/types.ts",
   "src/lib/nutritionDatabase.ts",
   "src/lib/routinesAndHabits.ts",
+  "src/lib/workspaceStore.ts",
+  "src/lib/localSpaces.ts",
   "src/app/api/state/route.ts",
+  "src/app/api/workspace/create/route.ts",
   "src/app/api/gemini/route.ts",
   "src/components/FitnessDashboard.tsx",
+  "src/components/OnboardingGateway.tsx",
   "src/app/layout.tsx",
   "src/app/page.tsx",
   "src/app/u/[slug]/page.tsx",
@@ -408,6 +412,111 @@ assert(
   highRated.strainScore > lowRated.strainScore &&
     highRated.workoutIntensityScore > lowRated.workoutIntensityScore,
   "Higher 1-10 workout rating increases Strain and Workout Intensity"
+);
+
+// 7. Verify Stage 1: Hardened Private Capability URLs, Storage Privacy, Rate Limits & Mobile v2 Redesign
+const workspaceStoreCode = fs.readFileSync(
+  path.join(root, "src/lib/workspaceStore.ts"),
+  "utf-8"
+);
+const stateRouteCode = fs.readFileSync(
+  path.join(root, "src/app/api/state/route.ts"),
+  "utf-8"
+);
+const createRouteCode = fs.readFileSync(
+  path.join(root, "src/app/api/workspace/create/route.ts"),
+  "utf-8"
+);
+const geminiRouteCode = fs.readFileSync(
+  path.join(root, "src/app/api/gemini/route.ts"),
+  "utf-8"
+);
+const nextConfigCode = fs.readFileSync(
+  path.join(root, "next.config.mjs"),
+  "utf-8"
+);
+const slugPageCode = fs.readFileSync(
+  path.join(root, "src/app/u/[slug]/page.tsx"),
+  "utf-8"
+);
+const gatewayCode = fs.readFileSync(
+  path.join(root, "src/components/OnboardingGateway.tsx"),
+  "utf-8"
+);
+
+// Verify unambiguous 32-char capability alphabet (no 0/o/1/l/i) and 10-char cryptographic token
+assert(
+  workspaceStoreCode.includes('CAPABILITY_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"'),
+  "32-char unambiguous capability alphabet verified"
+);
+assert(
+  workspaceStoreCode.includes("crypto.randomBytes") &&
+    workspaceStoreCode.includes("createHmac(\"sha256\""),
+  "Cryptographic token generation and HMAC-SHA256 blob key derivation verified"
+);
+assert(
+  workspaceStoreCode.includes("768 * 1024"),
+  "768 KB max state payload cap defined"
+);
+assert(
+  stateRouteCode.includes("exists: false") &&
+    stateRouteCode.includes("status: 413") &&
+    stateRouteCode.includes("status: 404"),
+  "State API returns exists:false on unknown GET, 413 on oversized POST, and 404 on uncreated slug POST"
+);
+assert(
+  createRouteCode.includes("mintCapabilitySlug") &&
+    createRouteCode.includes("checkSlidingWindowRateLimit") &&
+    createRouteCode.includes("status: 429"),
+  "Workspace creation route mints capability slug with rate limiting"
+);
+assert(
+  geminiRouteCode.includes("checkSlidingWindowRateLimit") &&
+    geminiRouteCode.includes('rateLimited: reason === "rate-limited"'),
+  "Gemini API route enforces sliding-window rate limit with graceful local fallback"
+);
+assert(
+  nextConfigCode.includes("Referrer-Policy") &&
+    nextConfigCode.includes("no-referrer") &&
+    nextConfigCode.includes("X-Robots-Tag") &&
+    nextConfigCode.includes("noindex, nofollow, noarchive"),
+  "next.config.mjs sets privacy headers for /u/:path*"
+);
+assert(
+  slugPageCode.includes("index: false") && slugPageCode.includes("follow: false"),
+  "/u/[slug] exports noindex/nofollow metadata"
+);
+for (const field of [
+  "workspaceId?:",
+  "authMode?:",
+  "ownerUserId?:",
+  "isGuest?:",
+  "createdAt?:",
+  "lastActiveAt?:",
+]) {
+  assert(
+    typesCode.includes(field),
+    `Optional Stage 1/2 field "${field}" present on UserProfileStore`
+  );
+}
+assert(
+  gatewayCode.includes("Launch My Private Space") &&
+    gatewayCode.includes("tester-profile") &&
+    gatewayCode.includes("guest-pulse") &&
+    gatewayCode.includes("demo-tracker") &&
+    gatewayCode.includes("anon-runner"),
+  "OnboardingGateway includes 4 balanced privacy-friendly guest pools & CTA"
+);
+assert(
+  dashboardCode.includes("1. Home") &&
+    dashboardCode.includes("1. Favs") &&
+    dashboardCode.includes("2. Food Search") &&
+    dashboardCode.includes("My Private Link") &&
+    dashboardCode.includes("Invite a Friend") &&
+    dashboardCode.includes("My Spaces") &&
+    dashboardCode.includes("Private Space Not Found") &&
+    dashboardCode.includes("Same as Yesterday"),
+  "Mobile Screen-by-Screen v2 redesign & Stage 1 link safety controls present in FitnessDashboard"
 );
 
 console.log("ALL TECH-TESTER INVARIANTS PASSED!");

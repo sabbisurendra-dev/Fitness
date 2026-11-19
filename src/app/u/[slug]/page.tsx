@@ -1,4 +1,12 @@
+import type { Metadata } from "next";
 import FitnessDashboard from "@/components/FitnessDashboard";
+
+export const metadata: Metadata = {
+  robots: {
+    index: false,
+    follow: false,
+  },
+};
 
 interface UserSlugPageProps {
   params: Promise<{ slug: string }>;

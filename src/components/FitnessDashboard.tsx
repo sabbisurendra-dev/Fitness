@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import {
   Dumbbell,
   Apple,
@@ -16,7 +17,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
-  ChevronUp,
   Sparkles,
   Sun,
   CloudCheck,
@@ -24,11 +24,7 @@ import {
   FileText,
   UserCheck,
   BookOpen,
-  Flame,
-  Droplets,
   Clock,
-  HeartPulse,
-  ArrowUpRight,
   Send,
   Bot,
   RotateCcw,
@@ -43,17 +39,22 @@ import {
   Calendar,
   Play,
   Square,
-  Timer,
   Star,
   ListChecks,
   X,
   Bell,
   SkipForward,
   SlidersHorizontal,
-  Zap,
   Layers,
-  Heart,
   Save,
+  Home,
+  Lock,
+  Download,
+  ExternalLink,
+  MessageCircle,
+  LayoutGrid,
+  Smartphone,
+  Link2,
 } from "lucide-react";
 import {
   UserProfileStore,
@@ -61,6 +62,7 @@ import {
   WorkoutExercise,
   ExerciseSet,
   ExerciseType,
+  WorkoutSetType,
   WorkoutRoutineTemplate,
   HabitDefinition,
   HabitCategory,
@@ -86,32 +88,40 @@ import {
   computePeriodSummary,
   findPreviousWorkoutSession,
   findPreviousExerciseSets,
-  findPreviousRoutineSession,
   buildRoutineExercisesWithHistory,
   computeUserFrequentStaples,
+  findLastBodyMetricEntry,
+  computeHabitRecoveryImpact,
   UserFrequentStaple,
 } from "@/lib/historyAndStaples";
 import {
   CATEGORIZED_EXERCISE_PRESETS,
-  DEFAULT_WORKOUT_ROUTINES,
   HABIT_CATALOG,
   DEFAULT_ACTIVE_HABIT_IDS,
   getEffectiveRoutines,
   getAllHabitDefinitions,
   getActiveHabitsForProfile,
 } from "@/lib/routinesAndHabits";
+import {
+  SavedSpaceRecord,
+  clearActiveSlugIfMatches,
+  dismissLinkNudge,
+  extractSlugFromInput,
+  getSavedSpaces,
+  isLinkNudgeDismissed,
+  setActiveSlug,
+  upsertSavedSpace,
+} from "@/lib/localSpaces";
 
 interface FitnessDashboardProps {
   initialSlug?: string;
 }
 
-type ActiveTab =
-  | "all"
-  | "workout"
-  | "nutrition"
-  | "sleep"
-  | "history"
-  | "research";
+type PrimaryScreen = "home" | "workouts" | "nutrition" | "more";
+type HomeSubPage = "checkin" | "summary";
+type WorkoutSubPage = "routines" | "sets" | "finish";
+type NutritionSubPage = "favs" | "search";
+type MoreSubPage = "journal" | "ai" | "trends";
 
 interface DecimalInputProps
   extends Omit<
@@ -124,12 +134,9 @@ interface DecimalInputProps
   max?: number;
   allowDecimal?: boolean;
   emptyAsZero?: boolean;
+  showEmptyWhenZero?: boolean;
 }
 
-/**
- * Controlled decimal/integer input that preserves raw user typing (e.g. "1.", "1.2", "0.5")
- * while focused and normalizes/clamps only on commit or valid parse.
- */
 function DecimalInput({
   value,
   onValueChange,
@@ -137,20 +144,24 @@ function DecimalInput({
   max,
   allowDecimal = true,
   emptyAsZero = true,
+  showEmptyWhenZero = false,
   onFocus,
   onBlur,
   ...rest
 }: DecimalInputProps) {
+  const formatDisplay = (v: number) => {
+    if (showEmptyWhenZero && (!Number.isFinite(v) || v === 0)) return "";
+    return Number.isFinite(v) ? String(v) : "0";
+  };
+
   const [focused, setFocused] = useState(false);
-  const [draft, setDraft] = useState<string>(
-    Number.isFinite(value) ? String(value) : "0"
-  );
+  const [draft, setDraft] = useState<string>(() => formatDisplay(value));
 
   useEffect(() => {
     if (!focused) {
-      setDraft(Number.isFinite(value) ? String(value) : "0");
+      setDraft(formatDisplay(value));
     }
-  }, [value, focused]);
+  }, [value, focused, showEmptyWhenZero]);
 
   const clampVal = (num: number) => {
     let next = Math.max(min, num);
@@ -163,7 +174,7 @@ function DecimalInput({
       {...rest}
       type="text"
       inputMode={allowDecimal ? "decimal" : "numeric"}
-      value={focused ? draft : Number.isFinite(value) ? String(value) : "0"}
+      value={focused ? draft : formatDisplay(value)}
       onFocus={(e) => {
         setFocused(true);
         setDraft(value === 0 ? "" : String(value));
@@ -193,27 +204,24 @@ function DecimalInput({
             ? clampVal(0)
             : clampVal(parsed);
         onValueChange(committed);
-        setDraft(String(committed));
+        setDraft(formatDisplay(committed));
         onBlur?.(e);
       }}
     />
   );
 }
 
-const QUICK_EXERCISE_PRESETS = [
-  { name: "Barbell Squat", group: "Legs" },
-  { name: "Romanian Deadlift", group: "Hamstrings" },
-  { name: "Overhead Press", group: "Shoulders" },
-  { name: "Pull-Ups / Chin-Ups", group: "Back" },
-  { name: "Dumbbell Lateral Raise", group: "Shoulders" },
-  { name: "Cable Tricep Pushdown", group: "Arms" },
-  { name: "Barbell Curl", group: "Arms" },
-  { name: "Leg Press", group: "Legs" },
-];
+function formatMMSS(sec: number): string {
+  const safe = Math.max(0, Math.floor(sec));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
 export default function FitnessDashboard({
   initialSlug = "main",
 }: FitnessDashboardProps) {
+  const router = useRouter();
   const slug = (initialSlug || "main").toLowerCase();
   const todayStr = new Date().toISOString().slice(0, 10);
 
@@ -221,17 +229,37 @@ export default function FitnessDashboard({
     createDefaultUserProfile(slug)
   );
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
-  const [activeTab, setActiveTab] = useState<ActiveTab>("all");
+  const [workspaceNotFound, setWorkspaceNotFound] = useState(false);
+  const [notFoundLinkInput, setNotFoundLinkInput] = useState("");
+  const [notFoundLinkError, setNotFoundLinkError] = useState("");
+  const [checkingNotFoundLink, setCheckingNotFoundLink] = useState(false);
+
+  // Screen-by-Screen Mobile-First Navigation + Optional Desktop Full View
+  const [activeScreen, setActiveScreen] = useState<PrimaryScreen>("home");
+  const [homeSubPage, setHomeSubPage] = useState<HomeSubPage>("checkin");
+  const [workoutSubPage, setWorkoutSubPage] = useState<WorkoutSubPage>("routines");
+  const [nutritionSubPage, setNutritionSubPage] = useState<NutritionSubPage>("favs");
+  const [moreSubPage, setMoreSubPage] = useState<MoreSubPage>("journal");
+  const [desktopFullView, setDesktopFullView] = useState(false);
+
+  // Header Privacy & Space Panels
+  const [openHeaderPanel, setOpenHeaderPanel] = useState<
+    null | "private-link" | "my-spaces"
+  >(null);
+  const [savedSpaces, setSavedSpaces] = useState<SavedSpaceRecord[]>([]);
+  const [existingSpaceInput, setExistingSpaceInput] = useState("");
+  const [existingSpaceError, setExistingSpaceError] = useState("");
+  const [checkingSpaceLink, setCheckingSpaceLink] = useState(false);
+  const [copyStatusText, setCopyStatusText] = useState("");
+  const lastCopyAnnouncementRef = useRef("");
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [linkNudgeDismissed, setLinkNudgeDismissed] = useState(true);
+
   const [syncState, setSyncState] = useState<
     "loading" | "saving" | "saved" | "local-only"
   >("loading");
   const [storageSource, setStorageSource] = useState<string>("loading");
-  const [copiedUrl, setCopiedUrl] = useState(false);
-  const [customSlugInput, setCustomSlugInput] = useState("");
-  const [showSlugSwitcher, setShowSlugSwitcher] = useState(false);
-  const [colorSchemeOverride, setColorSchemeOverride] = useState<
-    "light dark" | "dark" | "light"
-  >("dark");
+  const [colorSchemeOverride, setColorSchemeOverride] = useState<"dark" | "light">("dark");
   const [geminiModel, setGeminiModel] = useState<
     "gemini-4-hydrogen" | "gemini-4-argon"
   >("gemini-4-hydrogen");
@@ -243,9 +271,8 @@ export default function FitnessDashboard({
   const [smartLogError, setSmartLogError] = useState("");
   const [coachError, setCoachError] = useState("");
   const [geminiStatusMessage, setGeminiStatusMessage] = useState("");
-  const [showAiHub, setShowAiHub] = useState(true);
 
-  // Open Food Search & Portion Customizer state (Global USDA + Indian ICMR-NIN)
+  // Open Food Search & Portion Customizer state
   const [foodSearchQuery, setFoodSearchQuery] = useState("");
   const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>("All");
   const [aiFoodResults, setAiFoodResults] = useState<FoodDatabaseItem[]>([]);
@@ -264,11 +291,12 @@ export default function FitnessDashboard({
   const [stapleQuantities, setStapleQuantities] = useState<Record<string, number>>({});
   const [lastSavedTimeLabel, setLastSavedTimeLabel] = useState<string>("");
 
-  // Morning Check-In Drawer, Afternoon Nudge & Live Workout / Dual-Mode Nutrition / Habits states
+  // Workout Dual Timers (WHOOP 5.0 Strength Trainer) + Accordion
   const [profileLoaded, setProfileLoaded] = useState(false);
-  const [showMorningDrawer, setShowMorningDrawer] = useState(false);
   const [currentHour, setCurrentHour] = useState<number>(12);
   const [liveElapsedSeconds, setLiveElapsedSeconds] = useState<number>(0);
+  const [restElapsedSeconds, setRestElapsedSeconds] = useState<number>(0);
+  const [expandedExerciseId, setExpandedExerciseId] = useState<string | null>(null);
   const [presetTypeFilter, setPresetTypeFilter] = useState<"all" | ExerciseType>("all");
   const [quickCardioType, setQuickCardioType] = useState<string>("Running");
   const [quickCardioMins, setQuickCardioMins] = useState<number>(20);
@@ -279,6 +307,8 @@ export default function FitnessDashboard({
   const [quickFoodName, setQuickFoodName] = useState("");
   const [quickFoodCalories, setQuickFoodCalories] = useState<number>(0);
   const [quickFoodProtein, setQuickFoodProtein] = useState<number>(0);
+
+  // WHOOP 5.0 100-Habit Catalog Dialog
   const [showHabitCatalogDialog, setShowHabitCatalogDialog] = useState(false);
   const [habitSearchQuery, setHabitSearchQuery] = useState("");
   const [habitCategoryFilter, setHabitCategoryFilter] = useState<"All" | HabitCategory>("All");
@@ -288,44 +318,81 @@ export default function FitnessDashboard({
   const [customHabitDefault, setCustomHabitDefault] = useState("5");
   const [customHabitCategory, setCustomHabitCategory] = useState<HabitCategory>("Supplements");
 
-  const morningDrawerRef = useRef<HTMLDialogElement | null>(null);
   const habitCatalogDialogRef = useRef<HTMLDialogElement | null>(null);
-  const nutritionSectionRef = useRef<HTMLElement | null>(null);
-  const workoutSectionRef = useRef<HTMLElement | null>(null);
-  const habitsSectionRef = useRef<HTMLElement | null>(null);
-  const hasAutoOpenedDrawerRef = useRef(false);
-
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isInitialLoadRef = useRef(true);
   const hasUserEditedRef = useRef(false);
+  const hasAutoSelectedHomeSubRef = useRef(false);
   const latestProfileRef = useRef<UserProfileStore>(profile);
 
   useEffect(() => {
     latestProfileRef.current = profile;
   }, [profile]);
 
-  // Sync theme override with <meta name="color-scheme"> and cross-tab storage events
+  // Accessible copy helper with VoiceOver repeat deduplication (per modern-web-guidance copy-button)
+  const announceCopyStatus = useCallback((message: string) => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    let nextMsg = message;
+    if (nextMsg === lastCopyAnnouncementRef.current) {
+      nextMsg += "\u00A0";
+    }
+    lastCopyAnnouncementRef.current = nextMsg;
+    setCopyStatusText(nextMsg);
+    copyTimerRef.current = setTimeout(() => {
+      setCopyStatusText("");
+    }, 2800);
+  }, []);
+
+  const copyTextToClipboard = useCallback(
+    async (text: string, successLabel: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        announceCopyStatus(successLabel);
+        return true;
+      } catch {
+        // Fallback for non-HTTPS or restricted clipboard contexts
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
+          document.body.append(ta);
+          ta.select();
+          const ok = document.execCommand("copy");
+          ta.remove();
+          if (ok) {
+            announceCopyStatus(successLabel);
+            return true;
+          }
+        } catch {
+          // ignore
+        }
+        announceCopyStatus("Copy failed — select and copy from address bar.");
+        return false;
+      }
+    },
+    [announceCopyStatus]
+  );
+
+  // Sync theme override with <meta name="color-scheme">
   useEffect(() => {
     const applyScheme = (scheme: "dark" | "light") => {
       setColorSchemeOverride(scheme);
       const meta = document.querySelector('meta[name="color-scheme"]');
-      if (meta) {
-        meta.setAttribute("content", scheme);
-      }
+      if (meta) meta.setAttribute("content", scheme);
     };
     try {
-      const stored = localStorage.getItem("color-scheme") as
-        | "dark"
-        | "light"
-        | null;
+      const stored = localStorage.getItem("color-scheme");
       applyScheme(stored === "light" ? "light" : "dark");
     } catch {
-      // ignore storage restrictions
+      // ignore
     }
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === "color-scheme" && (e.newValue === "light" || e.newValue === "dark")) {
+      if (
+        e.key === "color-scheme" &&
+        (e.newValue === "light" || e.newValue === "dark")
+      ) {
         applyScheme(e.newValue);
       }
     };
@@ -337,9 +404,7 @@ export default function FitnessDashboard({
     const nextScheme = colorSchemeOverride === "dark" ? "light" : "dark";
     setColorSchemeOverride(nextScheme);
     const meta = document.querySelector('meta[name="color-scheme"]');
-    if (meta) {
-      meta.setAttribute("content", nextScheme);
-    }
+    if (meta) meta.setAttribute("content", nextScheme);
     try {
       localStorage.setItem("color-scheme", nextScheme);
     } catch {
@@ -347,10 +412,15 @@ export default function FitnessDashboard({
     }
   };
 
-  // Load initial profile from Cloud API + LocalStorage fallback without clobbering active user edits
+  // Load workspace with Strict Existence Guard + Cross-Device Auto-Remember + Stale-Link Self-Healing
   useEffect(() => {
     let cancelled = false;
     hasUserEditedRef.current = false;
+    hasAutoSelectedHomeSubRef.current = false;
+    setWorkspaceNotFound(false);
+    setLinkNudgeDismissed(isLinkNudgeDismissed(slug));
+    setSavedSpaces(getSavedSpaces());
+
     async function loadProfile() {
       setSyncState("loading");
       const localKey = `pulse-loop-profile-${slug}`;
@@ -375,14 +445,22 @@ export default function FitnessDashboard({
         });
         if (res.ok) {
           const data = await res.json();
-          if (!cancelled && data?.profile) {
+          if (cancelled) return;
+
+          if (data?.exists === false) {
+            // Strict existence guard: do NOT silently open blank profile on typos
+            clearActiveSlugIfMatches(slug);
+            setWorkspaceNotFound(true);
+            setSyncState("local-only");
+            setProfileLoaded(true);
+            return;
+          }
+
+          if (data?.profile) {
             const serverProfile = data.profile as UserProfileStore;
             setStorageSource(data.source || "cloud");
 
-            // Never clobber edits typed while fetch was in-flight
-            if (hasUserEditedRef.current) {
-              return;
-            }
+            if (hasUserEditedRef.current) return;
 
             const localTs = localData?.updatedAt
               ? Date.parse(localData.updatedAt) || 0
@@ -391,11 +469,9 @@ export default function FitnessDashboard({
               ? Date.parse(serverProfile.updatedAt) || 0
               : 0;
 
-            if (
-              localData &&
-              localData.updatedAt &&
-              (data.source === "default" || localTs > serverTs)
-            ) {
+            let chosenProfile = serverProfile;
+            if (localData && localData.updatedAt && localTs > serverTs) {
+              chosenProfile = localData;
               setProfile(localData);
               latestProfileRef.current = localData;
               await fetch("/api/state", {
@@ -412,6 +488,15 @@ export default function FitnessDashboard({
                 // ignore
               }
             }
+
+            // Cross-Device Auto-Remember
+            setActiveSlug(slug);
+            const updatedSpaces = upsertSavedSpace({
+              slug,
+              displayName: chosenProfile.displayName || slug,
+              isGuest: chosenProfile.isGuest,
+            });
+            setSavedSpaces(updatedSpaces);
             setSyncState("saved");
           }
         } else {
@@ -419,15 +504,18 @@ export default function FitnessDashboard({
         }
       } catch {
         if (!cancelled) {
+          if (!localData) {
+            setWorkspaceNotFound(true);
+          }
           setSyncState("local-only");
         }
       } finally {
-        isInitialLoadRef.current = false;
         if (!cancelled) {
           setProfileLoaded(true);
         }
       }
     }
+
     loadProfile();
     return () => {
       cancelled = true;
@@ -436,6 +524,7 @@ export default function FitnessDashboard({
 
   const flushSaveNow = useCallback(
     async (profileOverride?: UserProfileStore, keepalive = false) => {
+      if (workspaceNotFound) return;
       const targetProfile = profileOverride || latestProfileRef.current;
       const localKey = `pulse-loop-profile-${slug}`;
       try {
@@ -472,23 +561,25 @@ export default function FitnessDashboard({
         setSyncState("local-only");
       }
     },
-    [slug]
+    [slug, workspaceNotFound]
   );
 
-  // Flush pending local edits on tab close / mobile Safari backgrounding
   useEffect(() => {
     const handlePageHide = () => {
-      if (hasUserEditedRef.current || saveTimerRef.current) {
+      if (
+        !workspaceNotFound &&
+        (hasUserEditedRef.current || saveTimerRef.current)
+      ) {
         void flushSaveNow(latestProfileRef.current, true);
       }
     };
     window.addEventListener("pagehide", handlePageHide);
     return () => window.removeEventListener("pagehide", handlePageHide);
-  }, [flushSaveNow]);
+  }, [flushSaveNow, workspaceNotFound]);
 
-  // Debounced auto-save on any profile state change
   const triggerAutoSave = useCallback(
     (nextProfile: UserProfileStore) => {
+      if (workspaceNotFound) return;
       hasUserEditedRef.current = true;
       latestProfileRef.current = nextProfile;
       const localKey = `pulse-loop-profile-${slug}`;
@@ -499,15 +590,13 @@ export default function FitnessDashboard({
       }
 
       setSyncState("saving");
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-      }
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 
       saveTimerRef.current = setTimeout(() => {
         void flushSaveNow(nextProfile);
-      }, 320);
+      }, 360);
     },
-    [slug, flushSaveNow]
+    [slug, flushSaveNow, workspaceNotFound]
   );
 
   const currentDay: DailyEntry =
@@ -525,7 +614,6 @@ export default function FitnessDashboard({
           updatedAt: new Date().toISOString(),
         };
 
-        // If useMealSum is enabled, recalculate daily calories, macros, fiber & hydration from meals
         if (updatedDay.nutrition.useMealSum) {
           const hasMealFiber = updatedDay.nutrition.meals.some(
             (m) => m.fiberGrams !== undefined
@@ -593,10 +681,18 @@ export default function FitnessDashboard({
           updatedAt: new Date().toISOString(),
         };
         triggerAutoSave(next);
+        if (next.displayName !== prev.displayName) {
+          const nextSpaces = upsertSavedSpace({
+            slug,
+            displayName: next.displayName,
+            isGuest: next.isGuest,
+          });
+          setSavedSpaces(nextSpaces);
+        }
         return next;
       });
     },
-    [triggerAutoSave]
+    [slug, triggerAutoSave]
   );
 
   const shiftDate = (daysDelta: number) => {
@@ -605,17 +701,97 @@ export default function FitnessDashboard({
     setSelectedDate(dt.toISOString().slice(0, 10));
   };
 
-  const handleCopyUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopiedUrl(true);
-      setTimeout(() => setCopiedUrl(false), 2200);
-    } catch {
-      // ignore
+  // Private Link, Invite a Friend, WhatsApp & Backup handlers
+  const getPrivateUrl = () =>
+    typeof window !== "undefined"
+      ? `${window.location.origin}/u/${slug}`
+      : `/u/${slug}`;
+
+  const getMasterInviteUrl = () =>
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://pulse-loop-fitness.vercel.app";
+
+  const handleCopyPrivateLink = async () => {
+    const ok = await copyTextToClipboard(
+      getPrivateUrl(),
+      "Private link copied (keep for your own devices only)."
+    );
+    if (ok) {
+      dismissLinkNudge(slug);
+      setLinkNudgeDismissed(true);
     }
   };
 
-  // Workout helpers with automatic progressive overload carryover & exercise type awareness
+  const handleInviteFriend = async () => {
+    await copyTextToClipboard(
+      getMasterInviteUrl(),
+      "Master invite link copied! Friends will get their own private space."
+    );
+  };
+
+  const getWhatsAppPrivateHref = () => {
+    const text = `My private PulseLoop Fitness link (${profile.displayName}): ${getPrivateUrl()}`;
+    return `https://wa.me/?text=${encodeURIComponent(text)}`;
+  };
+
+  const handleDownloadJsonBackup = () => {
+    try {
+      const blob = new Blob([JSON.stringify(profile, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pulseloop-${slug}-${selectedDate}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      announceCopyStatus("JSON backup downloaded.");
+    } catch {
+      announceCopyStatus("Unable to download backup.");
+    }
+  };
+
+  const handleVerifyAndOpenSpace = async (
+    rawInput: string,
+    setErr: (msg: string) => void,
+    setBusy: (b: boolean) => void
+  ) => {
+    const parsedSlug = extractSlugFromInput(rawInput);
+    if (!parsedSlug) {
+      setErr("Paste a private URL or space code first.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const res = await fetch(
+        `/api/state?slug=${encodeURIComponent(parsedSlug)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json();
+      if (!res.ok || !data?.exists || !data?.profile) {
+        setErr("We couldn't find that private space — please check for typos.");
+        setBusy(false);
+        return;
+      }
+      upsertSavedSpace({
+        slug: parsedSlug,
+        displayName: data.profile.displayName || parsedSlug,
+        isGuest: data.profile.isGuest,
+      });
+      setActiveSlug(parsedSlug);
+      setOpenHeaderPanel(null);
+      router.push(`/u/${parsedSlug}`);
+    } catch {
+      setErr("Unable to verify that link right now.");
+      setBusy(false);
+    }
+  };
+
+  // Workout helpers (WHOOP 5.0 Strength Trainer + unique ID integrity)
   const addExercise = (
     presetName = "",
     presetGroup = "Strength",
@@ -662,6 +838,7 @@ export default function FitnessDashboard({
             weight: isBw ? 0 : s.weight,
             reps: s.reps,
             rpe: s.rpe,
+            setType: idx === 0 ? "1" : "2",
             completed: true,
           }))
         : [
@@ -669,6 +846,7 @@ export default function FitnessDashboard({
               id: `s-${Date.now()}`,
               weight: isBw ? 0 : options?.defaultWeight ?? 40,
               reps: options?.defaultReps ?? (isBw ? 15 : 10),
+              setType: "1",
               completed: true,
             },
           ];
@@ -690,6 +868,8 @@ export default function FitnessDashboard({
       },
       checkIn: { ...d.checkIn, workoutSkipped: false },
     }));
+    setExpandedExerciseId(newEx.id);
+    setWorkoutSubPage("sets");
   };
 
   const applyWorkoutRoutine = (routine: WorkoutRoutineTemplate) => {
@@ -698,6 +878,13 @@ export default function FitnessDashboard({
       selectedDate,
       routine
     );
+    const taggedExercises = built.exercises.map((ex) => ({
+      ...ex,
+      sets: ex.sets.map((s, idx) => ({
+        ...s,
+        setType: (idx === 0 ? "W" : idx === ex.sets.length - 1 && ex.sets.length >= 3 ? "F" : "1") as WorkoutSetType,
+      })),
+    }));
     updateCurrentDay((d) => ({
       ...d,
       workout: {
@@ -705,14 +892,18 @@ export default function FitnessDashboard({
         routineId: routine.id,
         sessionTitle: routine.name,
         skipped: false,
-        exercises: built.exercises,
+        exercises: taggedExercises,
       },
       checkIn: { ...d.checkIn, workoutSkipped: false },
     }));
+    if (taggedExercises[0]) {
+      setExpandedExerciseId(taggedExercises[0].id);
+    }
+    setWorkoutSubPage("sets");
     setWorkoutStatusBanner(
       built.sourceDate
-        ? `Tagged "${routine.name}" and pre-filled previous weights & reps from ${built.sourceDate}.`
-        : `Tagged "${routine.name}" with ${built.exercises.length} baseline exercises & rep ranges.`
+        ? `Tagged "${routine.name}" and pre-filled previous weights from ${built.sourceDate}.`
+        : `Tagged "${routine.name}" with ${taggedExercises.length} exercises.`
     );
   };
 
@@ -724,12 +915,31 @@ export default function FitnessDashboard({
         ...d.workout,
         startedAt: nowIso,
         endedAt: null,
+        inSetActive: true,
+        restStartedAt: null,
         skipped: false,
       },
       checkIn: { ...d.checkIn, workoutSkipped: false },
     }));
     setLiveElapsedSeconds(0);
-    setWorkoutStatusBanner("Live workout timer started. Tag a routine or log sets as you go.");
+    setRestElapsedSeconds(0);
+    setWorkoutStatusBanner("WHOOP Strength session live — track sets and rest periods on this screen.");
+  };
+
+  const toggleActiveSetState = () => {
+    const nowIso = new Date().toISOString();
+    const currentlyInSet = Boolean(currentDay.workout.inSetActive);
+    updateCurrentDay((d) => ({
+      ...d,
+      workout: {
+        ...d.workout,
+        inSetActive: !currentlyInSet,
+        restStartedAt: currentlyInSet ? nowIso : null,
+      },
+    }));
+    if (currentlyInSet) {
+      setRestElapsedSeconds(0);
+    }
   };
 
   const stopLiveWorkout = () => {
@@ -746,12 +956,15 @@ export default function FitnessDashboard({
       workout: {
         ...d.workout,
         endedAt: nowIso,
+        inSetActive: false,
+        restStartedAt: null,
         gymDurationMinutes: elapsedMins,
         skipped: false,
       },
     }));
+    setWorkoutSubPage("finish");
     setWorkoutStatusBanner(
-      `Workout stopped (${elapsedMins} min captured). Rate your workout out of 10 below to finalize strain!`
+      `Workout stopped (${elapsedMins} min captured). Rate effort 1–10 below to finalize Strain!`
     );
   };
 
@@ -777,6 +990,8 @@ export default function FitnessDashboard({
         skipped: true,
         startedAt: null,
         endedAt: null,
+        inSetActive: false,
+        restStartedAt: null,
       },
       checkIn: { ...d.checkIn, workoutSkipped: true },
     }));
@@ -813,14 +1028,18 @@ export default function FitnessDashboard({
       focus: `${currentDay.workout.exercises.length} saved exercises`,
       exercises: currentDay.workout.exercises.map((ex, idx) => {
         const firstSet = ex.sets[0];
-        const isBw = ex.exerciseType === "bodyweight" || (firstSet && firstSet.weight === 0);
+        const isBw =
+          ex.exerciseType === "bodyweight" ||
+          (firstSet && firstSet.weight === 0);
         return {
           id: `tpl-${Date.now()}-${idx}`,
           name: ex.name,
           muscleGroup: ex.muscleGroup || "Strength",
           exerciseType: isBw ? "bodyweight" : "strength",
           defaultSets: Math.max(1, ex.sets.length),
-          repRange: ex.targetRepRange || `${Math.max(1, (firstSet?.reps || 10) - 2)}-${(firstSet?.reps || 10) + 2}`,
+          repRange:
+            ex.targetRepRange ||
+            `${Math.max(1, (firstSet?.reps || 10) - 2)}-${(firstSet?.reps || 10) + 2}`,
           baselineWeight: isBw ? 0 : firstSet?.weight ?? 20,
           baselineReps: firstSet?.reps ?? 10,
         };
@@ -832,11 +1051,15 @@ export default function FitnessDashboard({
     }));
     updateCurrentDay((d) => ({
       ...d,
-      workout: { ...d.workout, routineId: newRoutine.id, sessionTitle: newRoutine.name },
+      workout: {
+        ...d.workout,
+        routineId: newRoutine.id,
+        sessionTitle: newRoutine.name,
+      },
     }));
     setNewRoutineName("");
     setShowSaveRoutineForm(false);
-    setWorkoutStatusBanner(`Saved workout routine "${newRoutine.name}" for 1-tap reuse.`);
+    setWorkoutStatusBanner(`Saved routine "${newRoutine.name}" for 1-tap reuse.`);
   };
 
   const loadPreviousWorkoutIntoToday = () => {
@@ -857,6 +1080,7 @@ export default function FitnessDashboard({
         weight: s.weight,
         reps: s.reps,
         rpe: s.rpe,
+        setType: s.setType || (sIdx === 0 ? "1" : "2"),
         completed: true,
       })),
     }));
@@ -872,12 +1096,11 @@ export default function FitnessDashboard({
         exercises: [...d.workout.exercises, ...clonedExercises],
       },
     }));
+    if (clonedExercises[0]) setExpandedExerciseId(clonedExercises[0].id);
+    setWorkoutSubPage("sets");
   };
 
-  const updateExercise = (
-    exId: string,
-    patch: Partial<WorkoutExercise>
-  ) => {
+  const updateExercise = (exId: string, patch: Partial<WorkoutExercise>) => {
     updateCurrentDay((d) => ({
       ...d,
       workout: {
@@ -912,6 +1135,7 @@ export default function FitnessDashboard({
             weight: lastSet ? lastSet.weight : 40,
             reps: lastSet ? lastSet.reps : 10,
             rpe: lastSet ? lastSet.rpe : 8,
+            setType: "2",
             completed: true,
           };
           return { ...ex, sets: [...ex.sets, newSet] };
@@ -925,10 +1149,15 @@ export default function FitnessDashboard({
     setId: string,
     patch: Partial<ExerciseSet>
   ) => {
+    const completingSet = patch.completed === true;
+    const nowIso = new Date().toISOString();
     updateCurrentDay((d) => ({
       ...d,
       workout: {
         ...d.workout,
+        ...(completingSet && d.workout.startedAt && !d.workout.endedAt
+          ? { inSetActive: false, restStartedAt: nowIso }
+          : {}),
         exercises: d.workout.exercises.map((ex) =>
           ex.id === exId
             ? {
@@ -941,6 +1170,13 @@ export default function FitnessDashboard({
         ),
       },
     }));
+    if (completingSet) setRestElapsedSeconds(0);
+  };
+
+  const cycleExerciseSetType = (exId: string, setId: string, current?: WorkoutSetType) => {
+    const order: WorkoutSetType[] = ["W", "1", "2", "F"];
+    const next = order[(order.indexOf(current || "1") + 1) % order.length];
+    updateExerciseSet(exId, setId, { setType: next });
   };
 
   const removeExerciseSet = (exId: string, setId: string) => {
@@ -1025,9 +1261,10 @@ export default function FitnessDashboard({
         useMealSum: true,
         meals: [...d.nutrition.meals, newMeal],
       },
+      checkIn: { ...d.checkIn, nutritionSkipped: false },
     }));
     setFoodSearchMessage(
-      `Added ${newMeal.name} (${calc.totalGrams}g · ${calc.calories} kcal, ${Math.round(calc.protein)}g P, ${calc.fiberGrams}g fiber, ${calc.waterLiters}L water) and updated daily totals.`
+      `Added ${newMeal.name} (${calc.totalGrams}g · ${calc.calories} kcal, ${Math.round(calc.protein)}g P).`
     );
   };
 
@@ -1045,6 +1282,7 @@ export default function FitnessDashboard({
         body: JSON.stringify({
           mode: "food-search",
           model: geminiModel,
+          slug,
           prompt: q,
         }),
       });
@@ -1061,7 +1299,8 @@ export default function FitnessDashboard({
       });
       handleSelectFoodItem(fetched);
       setFoodSearchMessage(
-        `Loaded standardized macros for "${fetched.name}" (${fetched.source}). Select portion/grams below and click Add Food.`
+        data.statusNote ||
+          `Loaded standardized macros for "${fetched.name}" (${fetched.source}).`
       );
     } catch (err) {
       setFoodSearchMessage(
@@ -1072,7 +1311,6 @@ export default function FitnessDashboard({
     }
   };
 
-  // Sleep 70 kg Indian male auto-approximation helper (supports 0-23h decimals)
   const updateSleepWith70kgIndianBaseline = (
     nextHours: number,
     nextQuality: number
@@ -1163,8 +1401,10 @@ export default function FitnessDashboard({
       ...d,
       nutrition: {
         ...d.nutrition,
+        useMealSum: true,
         meals: [...d.nutrition.meals, meal],
       },
+      checkIn: { ...d.checkIn, nutritionSkipped: false },
     }));
   };
 
@@ -1232,15 +1472,149 @@ export default function FitnessDashboard({
     }));
   };
 
-  // Gemini Interactions API helpers (wired to /api/gemini for /, /u/[slug])
+  const addQuickCustomFood = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = quickFoodName.trim();
+    if (!cleanName && quickFoodCalories <= 0 && quickFoodProtein <= 0) return;
+    const newMeal: MealEntry = {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: new Date().toTimeString().slice(0, 5),
+      name: cleanName || "Quick Food",
+      calories: Math.max(0, Math.round(quickFoodCalories)),
+      protein: Math.max(0, Math.round(quickFoodProtein)),
+      carbs: 0,
+      fats: 0,
+      note: "Added via Quick Foods",
+    };
+    updateCurrentDay((d) => ({
+      ...d,
+      nutrition: {
+        ...d.nutrition,
+        useMealSum: true,
+        meals: [...d.nutrition.meals, newMeal],
+      },
+      checkIn: { ...d.checkIn, nutritionSkipped: false },
+    }));
+    setQuickFoodName("");
+    setQuickFoodCalories(0);
+    setQuickFoodProtein(0);
+  };
+
+  // WHOOP 5.0 Journal Habit handlers
+  const updateHabitEntry = (
+    habitId: string,
+    patch: Partial<DailyHabitEntry> | null
+  ) => {
+    updateCurrentDay((d) => {
+      const nextLogs: Record<string, DailyHabitEntry> = {
+        ...(d.habitLogs || {}),
+      };
+      if (patch === null) {
+        delete nextLogs[habitId];
+      } else {
+        nextLogs[habitId] = {
+          ...(nextLogs[habitId] || {}),
+          ...patch,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return {
+        ...d,
+        habitLogs: nextLogs,
+        checkIn: { ...d.checkIn, habitsSkipped: false },
+      };
+    });
+  };
+
+  const applySameHabitsAsYesterday = () => {
+    const dt = new Date(`${selectedDate}T12:00:00`);
+    dt.setDate(dt.getDate() - 1);
+    const yesterdayStr = dt.toISOString().slice(0, 10);
+    const prevDates = Object.keys(profile.days)
+      .filter((d) => d < selectedDate && profile.days[d]?.habitLogs && Object.keys(profile.days[d].habitLogs || {}).length > 0)
+      .sort((a, b) => b.localeCompare(a));
+    const sourceDate = profile.days[yesterdayStr]?.habitLogs && Object.keys(profile.days[yesterdayStr].habitLogs || {}).length > 0
+      ? yesterdayStr
+      : prevDates[0];
+    if (!sourceDate) return;
+    const prevLogs = profile.days[sourceDate]?.habitLogs || {};
+    updateCurrentDay((d) => ({
+      ...d,
+      habitLogs: {
+        ...(d.habitLogs || {}),
+        ...Object.fromEntries(
+          Object.entries(prevLogs).map(([k, v]) => [
+            k,
+            { ...v, updatedAt: new Date().toISOString() },
+          ])
+        ),
+      },
+      checkIn: { ...d.checkIn, habitsSkipped: false },
+    }));
+  };
+
+  const clearAllHabitsToday = () => {
+    updateCurrentDay((d) => ({
+      ...d,
+      habitLogs: {},
+    }));
+  };
+
+  const toggleActiveHabit = (habitId: string) => {
+    updateProfileMeta((p) => {
+      const currentIds =
+        p.activeHabitIds && p.activeHabitIds.length > 0
+          ? p.activeHabitIds
+          : DEFAULT_ACTIVE_HABIT_IDS;
+      const exists = currentIds.includes(habitId);
+      const nextIds = exists
+        ? currentIds.filter((id) => id !== habitId)
+        : [...currentIds, habitId];
+      return { ...p, activeHabitIds: nextIds };
+    });
+  };
+
+  const handleAddCustomHabit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = customHabitName.trim();
+    if (!clean) return;
+    const newId = `custom-habit-${clean
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .slice(0, 28)}-${Date.now().toString(36).slice(-4)}`;
+    const newDef: HabitDefinition = {
+      id: newId,
+      name: clean,
+      category: customHabitCategory,
+      inputType: customHabitType,
+      ...(customHabitType === "dosage"
+        ? {
+            unit: customHabitUnit.trim() || "units",
+            defaultValue: customHabitDefault.trim() || "1",
+          }
+        : {}),
+    };
+    updateProfileMeta((p) => {
+      const currentIds =
+        p.activeHabitIds && p.activeHabitIds.length > 0
+          ? p.activeHabitIds
+          : DEFAULT_ACTIVE_HABIT_IDS;
+      return {
+        ...p,
+        customHabitDefinitions: [newDef, ...(p.customHabitDefinitions || [])],
+        activeHabitIds: [...currentIds, newId],
+      };
+    });
+    setCustomHabitName("");
+  };
+
+  // Gemini Interactions API helpers
   const handleTextareaKeyDown = (
     e: React.KeyboardEvent<HTMLTextAreaElement>
   ) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (e.nativeEvent.isComposing || e.keyCode === 229) {
-        return;
-      }
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       e.currentTarget.form?.requestSubmit();
     }
   };
@@ -1276,7 +1650,8 @@ export default function FitnessDashboard({
         },
       }));
       setGeminiStatusMessage(
-        `Gemini (${data.model || geminiModel}) generated recovery prescription: ${prescription.headline}`
+        data.statusNote ||
+          `Gemini (${data.model || geminiModel}) generated prescription: ${prescription.headline}`
       );
     } catch (err) {
       setGeminiStatusMessage(
@@ -1316,9 +1691,7 @@ export default function FitnessDashboard({
         meals: [...d.nutrition.meals, newMeal],
       },
     }));
-    setGeminiStatusMessage(
-      `Logged recommended meal "${newMeal.name}" (${newMeal.calories} kcal, ${newMeal.protein}g P).`
-    );
+    setGeminiStatusMessage(`Logged "${newMeal.name}" (${newMeal.calories} kcal).`);
   };
 
   const handleApplyRecommendedExercise = (
@@ -1331,6 +1704,7 @@ export default function FitnessDashboard({
       weight: Math.max(0, Number(ex.weight) || 0),
       reps: Math.max(1, Math.round(Number(ex.reps) || 10)),
       rpe: Math.max(1, Math.min(10, Number(ex.rpe) || 8)),
+      setType: idx === 0 ? "1" : "2",
       completed: true,
     }));
     const newExercise: WorkoutExercise = {
@@ -1347,9 +1721,7 @@ export default function FitnessDashboard({
         exercises: [...d.workout.exercises, newExercise],
       },
     }));
-    setGeminiStatusMessage(
-      `Added exercise "${newExercise.name}" (${numSets} sets) to Workouts.`
-    );
+    setGeminiStatusMessage(`Added "${newExercise.name}" (${numSets} sets).`);
   };
 
   const handleSmartLogSubmit = async (e: React.FormEvent) => {
@@ -1424,6 +1796,7 @@ export default function FitnessDashboard({
             weight: Math.max(0, Number(ex.weight) || 0),
             reps: Math.max(1, Math.round(Number(ex.reps) || 10)),
             rpe: Math.max(1, Math.min(10, Number(ex.rpe) || 8)),
+            setType: sIdx === 0 ? "1" : "2",
             completed: true,
           })),
         };
@@ -1498,7 +1871,8 @@ export default function FitnessDashboard({
 
       setSmartLogInput("");
       setGeminiStatusMessage(
-        parsed.summaryMessage ||
+        data.statusNote ||
+          parsed.summaryMessage ||
           `Smart-logged ${addedExercises.length} exercise(s) and ${addedMeals.length} meal(s).`
       );
     } catch (err) {
@@ -1570,7 +1944,7 @@ export default function FitnessDashboard({
         },
       }));
       setGeminiStatusMessage(
-        `Gemini coach (${data.model || geminiModel}) replied.`
+        data.statusNote || `Gemini coach (${data.model || geminiModel}) replied.`
       );
     } catch (err) {
       setCoachError(
@@ -1593,132 +1967,21 @@ export default function FitnessDashboard({
     setGeminiStatusMessage("Started a fresh Gemini Interactions thread.");
   };
 
-  const addQuickCustomFood = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanName = quickFoodName.trim();
-    if (!cleanName && quickFoodCalories <= 0 && quickFoodProtein <= 0) return;
-    const newMeal: MealEntry = {
-      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      time: new Date().toTimeString().slice(0, 5),
-      name: cleanName || "Quick Food",
-      calories: Math.max(0, Math.round(quickFoodCalories)),
-      protein: Math.max(0, Math.round(quickFoodProtein)),
-      carbs: 0,
-      fats: 0,
-      note: "Added via Quick Foods entry",
-    };
-    updateCurrentDay((d) => ({
-      ...d,
-      nutrition: {
-        ...d.nutrition,
-        useMealSum: true,
-        meals: [...d.nutrition.meals, newMeal],
-      },
-      checkIn: { ...d.checkIn, nutritionSkipped: false },
-    }));
-    setQuickFoodName("");
-    setQuickFoodCalories(0);
-    setQuickFoodProtein(0);
-  };
-
-  const updateHabitEntry = (
-    habitId: string,
-    patch: Partial<DailyHabitEntry> | null
-  ) => {
-    updateCurrentDay((d) => {
-      const nextLogs: Record<string, DailyHabitEntry> = {
-        ...(d.habitLogs || {}),
-      };
-      if (patch === null) {
-        delete nextLogs[habitId];
-      } else {
-        nextLogs[habitId] = {
-          ...(nextLogs[habitId] || {}),
-          ...patch,
-          updatedAt: new Date().toISOString(),
-        };
-      }
-      return {
-        ...d,
-        habitLogs: nextLogs,
-        checkIn: { ...d.checkIn, habitsSkipped: false },
-      };
-    });
-  };
-
-  const toggleActiveHabit = (habitId: string) => {
-    updateProfileMeta((p) => {
-      const currentIds =
-        p.activeHabitIds && p.activeHabitIds.length > 0
-          ? p.activeHabitIds
-          : DEFAULT_ACTIVE_HABIT_IDS;
-      const exists = currentIds.includes(habitId);
-      const nextIds = exists
-        ? currentIds.filter((id) => id !== habitId)
-        : [...currentIds, habitId];
-      return {
-        ...p,
-        activeHabitIds: nextIds,
-      };
-    });
-  };
-
-  const handleAddCustomHabit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = customHabitName.trim();
-    if (!clean) return;
-    const newId = `custom-habit-${clean
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .slice(0, 28)}-${Date.now().toString(36).slice(-4)}`;
-    const newDef: HabitDefinition = {
-      id: newId,
-      name: clean,
-      category: customHabitCategory,
-      inputType: customHabitType,
-      ...(customHabitType === "dosage"
-        ? {
-            unit: customHabitUnit.trim() || "units",
-            defaultValue: customHabitDefault.trim() || "1",
-          }
-        : {}),
-    };
-    updateProfileMeta((p) => {
-      const currentIds =
-        p.activeHabitIds && p.activeHabitIds.length > 0
-          ? p.activeHabitIds
-          : DEFAULT_ACTIVE_HABIT_IDS;
-      return {
-        ...p,
-        customHabitDefinitions: [newDef, ...(p.customHabitDefinitions || [])],
-        activeHabitIds: [...currentIds, newId],
-      };
-    });
-    setCustomHabitName("");
-  };
-
   const analysis = calculateSufficiencyAnalysis(currentDay, profile);
-
-  const effectiveRoutines = useMemo(
-    () => getEffectiveRoutines(profile),
-    [profile]
-  );
-
+  const effectiveRoutines = useMemo(() => getEffectiveRoutines(profile), [profile]);
   const allHabitDefinitions = useMemo(
     () => getAllHabitDefinitions(profile),
     [profile]
   );
-
   const activeHabits = useMemo(
     () => getActiveHabitsForProfile(profile),
     [profile]
   );
 
   const isSleepLogged = currentDay.sleep.totalHours > 0;
-  const isNutritionLogged =
-    currentDay.nutrition.calories > 0 ||
-    currentDay.nutrition.protein > 0 ||
-    currentDay.nutrition.meals.length > 0;
+  const isWeightLoggedToday = Boolean(
+    currentDay.bodyMetrics?.weight && currentDay.bodyMetrics.weight > 0
+  );
   const isWorkoutLive = Boolean(
     currentDay.workout.startedAt && !currentDay.workout.endedAt
   );
@@ -1726,6 +1989,32 @@ export default function FitnessDashboard({
     currentDay.workout.exercises.length > 0 ||
     currentDay.workout.gymDurationMinutes > 0 ||
     currentDay.workout.cardioMinutes > 0;
+  const isTodayBlank = !isDailyEntryLogged(currentDay);
+
+  const hasAnyMeaningfulLog = useMemo(
+    () => Object.values(profile.days).some((day) => isDailyEntryLogged(day)),
+    [profile.days]
+  );
+
+  const lastWeightRef = useMemo(
+    () => findLastBodyMetricEntry(profile, selectedDate, "weight"),
+    [profile, selectedDate]
+  );
+  const lastBodyFatRef = useMemo(
+    () => findLastBodyMetricEntry(profile, selectedDate, "bodyFatPct"),
+    [profile, selectedDate]
+  );
+
+  // Muscular Load vs Cardio Load split (WHOOP 5.0 Strength Trainer)
+  const muscularLoadPct = useMemo(() => {
+    const strengthSignal = analysis.totalSets * 8 + analysis.totalVolume / 220;
+    const cardioSignal = (Number(currentDay.workout.cardioMinutes) || 0) * 3.5;
+    if (strengthSignal === 0 && cardioSignal === 0) return 0;
+    return Math.min(
+      98,
+      Math.max(10, Math.round((strengthSignal / (strengthSignal + cardioSignal)) * 100))
+    );
+  }, [analysis.totalSets, analysis.totalVolume, currentDay.workout.cardioMinutes]);
 
   const loggedHabitsCount = useMemo(() => {
     const logs = currentDay.habitLogs || {};
@@ -1735,45 +2024,52 @@ export default function FitnessDashboard({
       if (h.inputType === "yes_no") {
         return entry.status === "yes" || entry.status === "no";
       }
-      return typeof entry.value === "string" && entry.value.trim().length > 0;
+      return (
+        entry.status === "yes" ||
+        entry.status === "no" ||
+        (typeof entry.value === "string" && entry.value.trim().length > 0)
+      );
     }).length;
   }, [activeHabits, currentDay.habitLogs]);
 
-  // Track client hour safely (avoids hydration mismatch) & auto-open conversational Morning Drawer once if sleep isn't logged
+  const hasPriorHabitsToCopy = useMemo(
+    () =>
+      Object.keys(profile.days).some(
+        (d) =>
+          d < selectedDate &&
+          profile.days[d]?.habitLogs &&
+          Object.keys(profile.days[d].habitLogs || {}).length > 0
+      ),
+    [profile.days, selectedDate]
+  );
+
+  // Client hour & auto-select Home sub-page on first load
   useEffect(() => {
     setCurrentHour(new Date().getHours());
   }, []);
 
   useEffect(() => {
-    if (
-      profileLoaded &&
-      !hasAutoOpenedDrawerRef.current &&
-      selectedDate === todayStr &&
-      !isSleepLogged &&
-      !currentDay.checkIn?.sleepSkipped
-    ) {
-      hasAutoOpenedDrawerRef.current = true;
-      setShowMorningDrawer(true);
+    if (profileLoaded && !hasAutoSelectedHomeSubRef.current) {
+      hasAutoSelectedHomeSubRef.current = true;
+      setHomeSubPage(isSleepLogged ? "summary" : "checkin");
     }
-  }, [
-    profileLoaded,
-    selectedDate,
-    todayStr,
-    isSleepLogged,
-    currentDay.checkIn?.sleepSkipped,
-  ]);
+  }, [profileLoaded, isSleepLogged]);
 
-  // Sync native <dialog> top-layer modals with React state
+  // Keep accordion selection valid when exercises exist
   useEffect(() => {
-    const dlg = morningDrawerRef.current;
-    if (!dlg) return;
-    if (showMorningDrawer && !dlg.open) {
-      dlg.showModal();
-    } else if (!showMorningDrawer && dlg.open) {
-      dlg.close();
+    if (currentDay.workout.exercises.length === 0) {
+      setExpandedExerciseId(null);
+      return;
     }
-  }, [showMorningDrawer]);
+    if (
+      !expandedExerciseId ||
+      !currentDay.workout.exercises.some((ex) => ex.id === expandedExerciseId)
+    ) {
+      setExpandedExerciseId(currentDay.workout.exercises[0].id);
+    }
+  }, [currentDay.workout.exercises, expandedExerciseId]);
 
+  // Sync native <dialog> for 100-Habit Catalog
   useEffect(() => {
     const dlg = habitCatalogDialogRef.current;
     if (!dlg) return;
@@ -1784,22 +2080,38 @@ export default function FitnessDashboard({
     }
   }, [showHabitCatalogDialog]);
 
-  // Live workout timer ticker (resilient across page reloads via startedAt ISO timestamp)
+  // Dual live workout & between-set rest timer ticker (resilient across reloads)
   useEffect(() => {
     if (!currentDay.workout.startedAt || currentDay.workout.endedAt) {
       setLiveElapsedSeconds(0);
+      setRestElapsedSeconds(0);
       return;
     }
-    const updateTick = () => {
+    const updateTicks = () => {
       const startedMs = Date.parse(currentDay.workout.startedAt || "");
       if (startedMs > 0) {
-        setLiveElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+        setLiveElapsedSeconds(
+          Math.max(0, Math.floor((Date.now() - startedMs) / 1000))
+        );
+      }
+      if (!currentDay.workout.inSetActive && currentDay.workout.restStartedAt) {
+        const restMs = Date.parse(currentDay.workout.restStartedAt);
+        if (restMs > 0) {
+          setRestElapsedSeconds(
+            Math.max(0, Math.floor((Date.now() - restMs) / 1000))
+          );
+        }
       }
     };
-    updateTick();
-    const interval = setInterval(updateTick, 1000);
+    updateTicks();
+    const interval = setInterval(updateTicks, 1000);
     return () => clearInterval(interval);
-  }, [currentDay.workout.startedAt, currentDay.workout.endedAt]);
+  }, [
+    currentDay.workout.startedAt,
+    currentDay.workout.endedAt,
+    currentDay.workout.inSetActive,
+    currentDay.workout.restStartedAt,
+  ]);
 
   const frequentStaples = useMemo(
     () => computeUserFrequentStaples(profile, 10),
@@ -1820,8 +2132,6 @@ export default function FitnessDashboard({
       ),
     [profile, selectedDate, currentDay.workout.sessionTitle]
   );
-
-  const isTodayBlank = !isDailyEntryLogged(currentDay);
 
   const combinedCatalogMatches = (() => {
     const baseMatches = searchFoodsCatalog(foodSearchQuery);
@@ -1855,16 +2165,121 @@ export default function FitnessDashboard({
     foodQuantity
   );
 
+  // =========================================================================
+  // STRICT EXISTENCE GUARD VIEW ("Private Space Not Found")
+  // =========================================================================
+  if (workspaceNotFound) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4 py-8">
+        <section
+          aria-labelledby="not-found-heading"
+          className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6 space-y-5 shadow-sm"
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30">
+              <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div>
+              <h1 id="not-found-heading" className="text-lg font-bold">
+                Private Space Not Found
+              </h1>
+              <p className="text-xs font-mono text-[var(--text-muted)]">
+                /u/{slug}
+              </p>
+            </div>
+          </div>
+
+          <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
+            No saved workspace exists at{" "}
+            <code className="text-[var(--text-primary)] font-semibold">
+              /u/{slug}
+            </code>
+            . Check your link for a typo, or start a new private space from the
+            Master Screen.
+          </p>
+
+          <button
+            type="button"
+            onClick={() => router.push("/?new=1")}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-emerald-400 transition"
+          >
+            <Sparkles className="h-4 w-4" aria-hidden="true" />
+            <span>Open Master Screen</span>
+          </button>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleVerifyAndOpenSpace(
+                notFoundLinkInput,
+                setNotFoundLinkError,
+                setCheckingNotFoundLink
+              );
+            }}
+            className="space-y-2 border-t border-[var(--border-subtle)] pt-4"
+          >
+            <label
+              htmlFor="paste-another-link"
+              className="block text-xs font-semibold text-[var(--text-muted)]"
+            >
+              Paste Another Private Link or Space Code
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="paste-another-link"
+                type="text"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="rahul-k9m4x7p2q8 or full URL"
+                value={notFoundLinkInput}
+                onChange={(e) => {
+                  setNotFoundLinkInput(e.target.value);
+                  setNotFoundLinkError("");
+                }}
+                className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-mono focus:border-sky-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={checkingNotFoundLink}
+                className="rounded-lg bg-sky-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-sky-400 disabled:opacity-60 transition"
+              >
+                {checkingNotFoundLink ? "Checking..." : "Open"}
+              </button>
+            </div>
+            {notFoundLinkError && (
+              <p role="alert" className="text-xs font-medium text-rose-400">
+                {notFoundLinkError}
+              </p>
+            )}
+          </form>
+        </section>
+      </div>
+    );
+  }
+
+  // Visibility flags for Screen-by-Screen vs Optional Desktop Full View
+  const showHome = desktopFullView || activeScreen === "home";
+  const showWorkouts = desktopFullView || activeScreen === "workouts";
+  const showNutrition = desktopFullView || activeScreen === "nutrition";
+  const showMore = desktopFullView || activeScreen === "more";
+
   return (
-    <div className="min-h-screen pb-16 transition-colors">
-      {/* Sticky Minimal Top Header */}
-      <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/90 backdrop-blur-md">
-        <div className="mx-auto max-w-5xl px-3.5 py-2.5 sm:px-6">
+    <div
+      className={`min-h-screen transition-colors ${
+        desktopFullView ? "pb-12" : "pb-24"
+      }`}
+    >
+      {/* =========================================================
+          COMPACT STICKY TOP HEADER (Single-row ergonomics, <12% vh)
+         ========================================================= */}
+      <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/95 backdrop-blur-md">
+        <div className="mx-auto max-w-4xl px-3 py-2 sm:px-5 space-y-1.5">
+          {/* Row 1: Editable Display Name + Sync Pill + Privacy/Space Controls */}
           <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* Brand + Editable Workspace Title */}
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
-                <Activity className="h-5 w-5" aria-hidden="true" />
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+                <Activity className="h-4 w-4" aria-hidden="true" />
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
@@ -1878,76 +2293,132 @@ export default function FitnessDashboard({
                         displayName: e.target.value,
                       }))
                     }
-                    className="inline-edit-input font-semibold tracking-tight text-base sm:text-lg truncate max-w-[200px] sm:max-w-xs"
+                    className="bg-transparent font-bold tracking-tight text-sm sm:text-base truncate max-w-[140px] sm:max-w-[220px] focus:outline-none border-b border-transparent focus:border-emerald-500"
                   />
-                  <span className="rounded-full bg-[var(--bg-elevated)] px-2 py-0.5 text-[11px] font-medium text-[var(--text-muted)] border border-[var(--border-subtle)]">
+                  <span className="hidden sm:inline rounded-full bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] font-mono text-[var(--text-muted)] border border-[var(--border-subtle)] truncate max-w-[145px]">
                     /u/{slug}
                   </span>
                 </div>
-                <p className="text-[11px] text-[var(--text-muted)]">
-                  Tap any number, exercise, or note to edit inline · Auto-saves live
-                </p>
+                <div className="flex items-center gap-2">
+                  <span
+                    role="status"
+                    aria-live="polite"
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold"
+                  >
+                    {syncState === "saving" || syncState === "loading" ? (
+                      <>
+                        <RefreshCw
+                          className="h-2.5 w-2.5 animate-spin text-amber-400"
+                          aria-hidden="true"
+                        />
+                        <span className="text-[var(--text-muted)]">
+                          {syncState === "loading" ? "Syncing..." : "Saving..."}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <CloudCheck
+                          className="h-3 w-3 text-emerald-400"
+                          aria-hidden="true"
+                        />
+                        <span className="text-emerald-400">
+                          {storageSource === "cloud-blob"
+                            ? "Cloud Saved ✓"
+                            : "Auto-Saved ✓"}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  <span className="sm:hidden text-[10px] font-mono text-[var(--text-muted)] truncate max-w-[110px]">
+                    /u/{slug}
+                  </span>
+                </div>
               </div>
             </div>
 
-            {/* Right Controls: Auto-save status, User URL Switcher, Share, Theme */}
-            <div className="flex items-center gap-1.5 sm:gap-2">
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-xs font-medium"
-              >
-                {syncState === "saving" || syncState === "loading" ? (
-                  <>
-                    <RefreshCw
-                      className="h-3.5 w-3.5 animate-spin text-amber-400"
-                      aria-hidden="true"
-                    />
-                    <span className="text-[var(--text-muted)]">
-                      {syncState === "loading" ? "Syncing..." : "Saving..."}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <CloudCheck
-                      className="h-3.5 w-3.5 text-emerald-400"
-                      aria-hidden="true"
-                    />
-                    <span className="text-emerald-400">
-                      {storageSource === "cloud-blob"
-                        ? "Cloud Saved ✓"
-                        : "Auto-Saved ✓"}
-                    </span>
-                  </>
+            {/* Right Controls: Date + My Private Link + Invite a Friend + My Spaces + Theme */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* Compact Date Picker */}
+              <div className="inline-flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1 py-0.5">
+                <button
+                  type="button"
+                  onClick={() => shiftDate(-1)}
+                  aria-label="Previous Day"
+                  className="rounded p-1 hover:bg-[var(--bg-surface)] transition"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                <input
+                  type="date"
+                  aria-label="Selected Log Date"
+                  value={selectedDate}
+                  onChange={(e) =>
+                    e.target.value && setSelectedDate(e.target.value)
+                  }
+                  className="bg-transparent px-1 text-[11px] font-semibold focus:outline-none w-[108px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => shiftDate(1)}
+                  aria-label="Next Day"
+                  className="rounded p-1 hover:bg-[var(--bg-surface)] transition"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                {selectedDate !== todayStr && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDate(todayStr)}
+                    className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-400"
+                  >
+                    Today
+                  </button>
                 )}
               </div>
 
               <button
                 type="button"
-                onClick={() => setShowSlugSwitcher((v) => !v)}
-                className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium hover:border-emerald-500/50 transition"
-                title="Switch or create a custom URL for another user"
+                onClick={() =>
+                  setOpenHeaderPanel((p) =>
+                    p === "private-link" ? null : "private-link"
+                  )
+                }
+                aria-expanded={openHeaderPanel === "private-link"}
+                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition ${
+                  openHeaderPanel === "private-link"
+                    ? "border-emerald-500 bg-emerald-500/15 text-emerald-400"
+                    : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-emerald-500/40"
+                }`}
               >
-                <UserCheck className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-                <span className="hidden sm:inline">Custom URL</span>
+                <Lock className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                <span>My Private Link</span>
               </button>
 
               <button
                 type="button"
-                onClick={handleCopyUrl}
-                className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20 transition"
+                onClick={() => void handleInviteFriend()}
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/20 transition"
               >
-                {copiedUrl ? (
-                  <>
-                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Copied!</span>
-                  </>
-                ) : (
-                  <>
-                    <Share2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Share Link</span>
-                  </>
-                )}
+                <Share2 className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Invite a Friend</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenHeaderPanel((p) =>
+                    p === "my-spaces" ? null : "my-spaces"
+                  )
+                }
+                aria-expanded={openHeaderPanel === "my-spaces"}
+                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition ${
+                  openHeaderPanel === "my-spaces"
+                    ? "border-indigo-500 bg-indigo-500/15 text-indigo-400"
+                    : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-indigo-500/40"
+                }`}
+              >
+                <UserCheck className="h-3.5 w-3.5 text-indigo-400" aria-hidden="true" />
+                <span>My Spaces</span>
               </button>
 
               <button
@@ -1958,1376 +2429,1126 @@ export default function FitnessDashboard({
                     ? "Switch to light mode"
                     : "Switch to dark mode"
                 }
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium hover:border-emerald-500/40 transition"
+                className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium hover:border-emerald-500/40 transition"
               >
                 {colorSchemeOverride === "dark" ? (
                   <>
                     <Sun className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
-                    <span>Light Mode</span>
+                    <span className="hidden sm:inline">Light Mode</span>
                   </>
                 ) : (
                   <>
                     <Moon className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
-                    <span>Dark Mode</span>
+                    <span className="hidden sm:inline">Dark Mode</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDesktopFullView((v) => !v)}
+                className="hidden lg:inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+                title="Switch between Screen-by-Screen view and Full Desktop Overview"
+              >
+                {desktopFullView ? (
+                  <>
+                    <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Screen View</span>
+                  </>
+                ) : (
+                  <>
+                    <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Full View</span>
                   </>
                 )}
               </button>
             </div>
           </div>
 
-          {/* Expandable Per-User Custom URL Bar */}
-          {showSlugSwitcher && (
-            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/30 bg-[var(--bg-elevated)] p-2.5 text-xs">
-              <div className="text-[var(--text-muted)]">
-                Every custom URL gets its own isolated auto-saved profile (e.g.{" "}
-                <code className="text-emerald-400">/u/rahul</code>,{" "}
-                <code className="text-emerald-400">/u/client-ananya</code>):
-              </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const clean = customSlugInput
-                    .trim()
-                    .toLowerCase()
-                    .replace(/[^a-z0-9-_]/g, "");
-                  if (clean) {
-                    window.location.href = `/u/${clean}`;
-                  }
-                }}
-                className="flex items-center gap-1.5"
-              >
-                <span className="text-[var(--text-muted)]">/u/</span>
-                <input
-                  type="text"
-                  placeholder="enter-name"
-                  autoCorrect="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  value={customSlugInput}
-                  onChange={(e) => setCustomSlugInput(e.target.value)}
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
-                />
+          {/* Dedicated Live Region Outside Copy Buttons (per modern-web-guidance copy-button) */}
+          <div
+            role="status"
+            aria-live="polite"
+            className={`text-[11px] font-semibold text-emerald-400 transition-opacity ${
+              copyStatusText ? "opacity-100 py-0.5" : "opacity-0 h-0 overflow-hidden"
+            }`}
+          >
+            {copyStatusText}
+          </div>
+
+          {/* On-Demand Panel 1: My Private Link */}
+          {openHeaderPanel === "private-link" && (
+            <div className="rounded-xl border border-emerald-500/35 bg-[var(--bg-elevated)] p-3 space-y-2.5 text-xs">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-bold text-emerald-400 flex items-center gap-1.5">
+                    <Lock className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Private edit link — keep for your own devices only.</span>
+                  </div>
+                  <div className="mt-0.5 font-mono text-[11px] break-all text-[var(--text-muted)]">
+                    {getPrivateUrl()}
+                  </div>
+                </div>
                 <button
-                  type="submit"
-                  className="rounded-lg bg-emerald-500 px-3 py-1 font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                  type="button"
+                  onClick={() => setOpenHeaderPanel(null)}
+                  aria-label="Close My Private Link panel"
+                  className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                 >
-                  Open URL
+                  <X className="h-4 w-4" aria-hidden="true" />
                 </button>
-              </form>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyPrivateLink()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+                >
+                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Copy Private Link</span>
+                </button>
+                <a
+                  href={getWhatsAppPrivateHref()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => {
+                    dismissLinkNudge(slug);
+                    setLinkNudgeDismissed(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
+                >
+                  <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Send to My WhatsApp</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={handleDownloadJsonBackup}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-semibold hover:border-emerald-500/40 transition"
+                >
+                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Download JSON Backup</span>
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Date Bar + Module Filter Pills */}
-          <div className="mt-2.5 flex flex-col gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between">
-            {/* Date Picker */}
-            <div className="flex items-center justify-between sm:justify-start gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1">
-              <button
-                type="button"
-                onClick={() => shiftDate(-1)}
-                aria-label="Previous Day"
-                className="rounded-lg p-1.5 hover:bg-[var(--bg-surface)] transition"
-              >
-                <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-              </button>
-              <input
-                type="date"
-                aria-label="Selected Log Date"
-                value={selectedDate}
-                onChange={(e) =>
-                  e.target.value && setSelectedDate(e.target.value)
-                }
-                className="bg-transparent px-2 text-xs font-semibold focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={() => shiftDate(1)}
-                aria-label="Next Day"
-                className="rounded-lg p-1.5 hover:bg-[var(--bg-surface)] transition"
-              >
-                <ChevronRight className="h-4 w-4" aria-hidden="true" />
-              </button>
-              {selectedDate !== todayStr && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedDate(todayStr)}
-                  className="rounded-lg bg-emerald-500/15 px-2 py-1 text-[11px] font-medium text-emerald-400"
-                >
-                  Today
-                </button>
-              )}
-            </div>
+          {/* On-Demand Panel 2: My Spaces */}
+          {openHeaderPanel === "my-spaces" && (
+            <div className="rounded-xl border border-indigo-500/35 bg-[var(--bg-elevated)] p-3 space-y-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-indigo-400">
+                  Spaces Saved on This Device
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => router.push("/?new=1")}
+                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-indigo-400 transition"
+                  >
+                    <Plus className="h-3 w-3" aria-hidden="true" />
+                    <span>Create New Space</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOpenHeaderPanel(null)}
+                    aria-label="Close My Spaces panel"
+                    className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
 
-            {/* Module Filter Pills */}
-            <nav
-              aria-label="Dashboard Modules"
-              className="flex items-center gap-1 overflow-x-auto no-scrollbar rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1"
-            >
-              {(
-                [
-                  { id: "all", label: "All Modules" },
-                  { id: "workout", label: "1. Workouts" },
-                  { id: "nutrition", label: "2. Nutrition" },
-                  { id: "sleep", label: "3. Sleep & Recovery" },
-                  { id: "history", label: "History & Trends" },
-                  { id: "research", label: "About Us" },
-                ] as { id: ActiveTab; label: string }[]
-              ).map((tab) => (
+              {savedSpaces.length > 0 && (
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  {savedSpaces.map((sp) => {
+                    const isCurrent = sp.slug === slug;
+                    return (
+                      <button
+                        key={sp.slug}
+                        type="button"
+                        onClick={() => {
+                          setOpenHeaderPanel(null);
+                          if (!isCurrent) {
+                            setActiveSlug(sp.slug);
+                            router.push(`/u/${sp.slug}`);
+                          }
+                        }}
+                        className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${
+                          isCurrent
+                            ? "border-emerald-500/50 bg-emerald-500/10"
+                            : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-indigo-400/50"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="font-bold truncate">{sp.displayName}</div>
+                          <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
+                            /u/{sp.slug}
+                          </div>
+                        </div>
+                        <span className="shrink-0 text-[10px] font-bold text-emerald-400">
+                          {isCurrent ? "Active" : "Switch →"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleVerifyAndOpenSpace(
+                    existingSpaceInput,
+                    setExistingSpaceError,
+                    setCheckingSpaceLink
+                  );
+                }}
+                className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2.5"
+              >
+                <Link2 className="h-3.5 w-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+                <input
+                  type="text"
+                  aria-label="Open an existing private link"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="Open existing link or slug..."
+                  value={existingSpaceInput}
+                  onChange={(e) => {
+                    setExistingSpaceInput(e.target.value);
+                    setExistingSpaceError("");
+                  }}
+                  className="flex-1 min-w-[160px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs font-mono"
+                />
                 <button
-                  key={tab.id}
+                  type="submit"
+                  disabled={checkingSpaceLink}
+                  className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-sky-400 disabled:opacity-60"
+                >
+                  {checkingSpaceLink ? "Checking..." : "Open Link"}
+                </button>
+                {existingSpaceError && (
+                  <p role="alert" className="w-full text-[11px] font-medium text-rose-400">
+                    {existingSpaceError}
+                  </p>
+                )}
+              </form>
+            </div>
+          )}
+        </div>
+
+        {/* Cross-Tab Active Workout Mini-Bar (Visible whenever timer is running & user switches screens) */}
+        {isWorkoutLive && !showWorkouts && (
+          <div className="border-t border-emerald-500/35 bg-emerald-500/15 px-3 py-1.5">
+            <div className="mx-auto max-w-4xl flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 font-bold text-emerald-400">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="tabular-nums">
+                  LIVE WORKOUT {formatMMSS(liveElapsedSeconds)}
+                </span>
+                <span className="text-[11px] font-semibold text-amber-400 tabular-nums">
+                  ·{" "}
+                  {currentDay.workout.inSetActive
+                    ? "ACTIVE SET"
+                    : `REST ${formatMMSS(restElapsedSeconds)}`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveScreen("workouts");
+                  setWorkoutSubPage("sets");
+                }}
+                className="rounded-md bg-emerald-500 px-2.5 py-0.5 text-[11px] font-bold text-slate-950"
+              >
+                Return &rarr;
+              </button>
+            </div>
+          </div>
+        )}
+      </header>
+
+      <main className="mx-auto max-w-4xl space-y-4 px-3 pt-3 sm:px-5 sm:pt-4">
+        {/* Smartly Timed "Keep Your Private Link Safe" Dismissible Nudge (Only after first real log) */}
+        {hasAnyMeaningfulLog && !linkNudgeDismissed && (
+          <section
+            aria-label="Save Your Private Link"
+            className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-3.5 space-y-2.5 text-xs"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-0.5">
+                <div className="font-bold text-emerald-400 flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    Your private space is live &amp; cloud-saved! Save your
+                    personal link to open it from any device:
+                  </span>
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Tip: Tap Safari Share &rarr; <strong>Add to Home Screen</strong> (or Chrome Menu &rarr; Install) for 1-tap access.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Dismiss save link reminder"
+                onClick={() => {
+                  dismissLinkNudge(slug);
+                  setLinkNudgeDismissed(true);
+                }}
+                className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a
+                href={getWhatsAppPrivateHref()}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => {
+                  dismissLinkNudge(slug);
+                  setLinkNudgeDismissed(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+              >
+                <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Send to My WhatsApp</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => void handleCopyPrivateLink()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/15 transition"
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Copy Private Link</span>
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* =========================================================
+            SCREEN 1: HOME (1. Morning Check-In | 2. Home Summary)
+           ========================================================= */}
+        {showHome && (
+          <section aria-label="Home Screen" className="space-y-3">
+            {!desktopFullView && (
+              <div
+                role="tablist"
+                aria-label="Home Sub-Pages"
+                className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-1"
+              >
+                <button
                   type="button"
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`whitespace-nowrap shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    activeTab === tab.id
-                      ? "bg-emerald-500 text-slate-950 font-semibold shadow-xs"
+                  role="tab"
+                  aria-selected={homeSubPage === "checkin"}
+                  onClick={() => setHomeSubPage("checkin")}
+                  className={`rounded-lg py-1.5 text-xs font-bold transition ${
+                    homeSubPage === "checkin"
+                      ? "bg-indigo-500 text-slate-950 shadow-xs"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                   }`}
                 >
-                  {tab.label}
+                  1. Morning Check-In
                 </button>
-              ))}
-            </nav>
-          </div>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-5xl space-y-5 px-3.5 pt-4 sm:px-6 sm:pt-5">
-        {/* TOP DAILY RECOVERY & SUFFICIENCY SUMMARY (Hidden on About Us & History tabs) */}
-        {(activeTab === "all" ||
-          activeTab === "workout" ||
-          activeTab === "nutrition" ||
-          activeTab === "sleep") && (
-          <section
-            aria-label="Daily Sufficiency and Readiness Summary"
-            className={`rounded-2xl border p-4 sm:p-5 transition ${
-              isTodayBlank
-                ? "border-[var(--border-subtle)] bg-[var(--bg-surface)]"
-                : analysis.verdictLevel === "optimal"
-                ? "border-emerald-500/40 bg-emerald-500/5"
-                : analysis.verdictLevel === "moderate"
-                ? "border-amber-500/40 bg-amber-500/5"
-                : "border-rose-500/40 bg-rose-500/5"
-            }`}
-          >
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="space-y-1.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider ${
-                      isTodayBlank
-                        ? "bg-sky-500/15 text-sky-400"
-                        : analysis.verdictLevel === "optimal"
-                        ? "bg-emerald-500/20 text-emerald-400"
-                        : analysis.verdictLevel === "moderate"
-                        ? "bg-amber-500/20 text-amber-400"
-                        : "bg-rose-500/20 text-rose-400"
-                    }`}
-                  >
-                    {isTodayBlank ? (
-                      <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
-                    ) : analysis.verdictLevel === "optimal" ? (
-                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    ) : analysis.verdictLevel === "moderate" ? (
-                      <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                    ) : (
-                      <AlertOctagon className="h-3.5 w-3.5" aria-hidden="true" />
-                    )}
-                    {isTodayBlank
-                      ? "Ready to Log Today"
-                      : analysis.verdictLevel === "optimal"
-                      ? "Optimal Recovery Loop"
-                      : analysis.verdictLevel === "moderate"
-                      ? "Borderline Sufficiency"
-                      : "Recovery / Fueling Deficit"}
-                  </span>
-
-                  <span className="text-xs text-[var(--text-muted)]">
-                    Daily Check-In · {selectedDate}
-                  </span>
-
-                  {isSleepLogged ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowMorningDrawer(true)}
-                      className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-medium text-indigo-400 hover:bg-indigo-500/20 transition"
-                    >
-                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                      <span>Morning Check-In Done ({currentDay.sleep.totalHours}h) · Edit</span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setShowMorningDrawer(true)}
-                      className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-indigo-400 transition shadow-xs"
-                    >
-                      <Moon className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Start Morning Check-In</span>
-                    </button>
-                  )}
-                </div>
-
-                {/* Afternoon Sleep Nudge (Visible if sleep not entered by 2:00 PM / 14:00) */}
-                {!isSleepLogged && selectedDate === todayStr && currentHour >= 14 && (
-                  <div
-                    role="status"
-                    className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-center gap-2 text-amber-300">
-                      <Bell className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
-                      <span>
-                        <strong>Afternoon Sleep Nudge:</strong> You haven&apos;t entered last night&apos;s sleep yet. Just 2 quick inputs calibrate your Readiness &amp; HRV.
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowMorningDrawer(true)}
-                      className="rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-amber-400 transition"
-                    >
-                      Enter Sleep Now
-                    </button>
-                  </div>
-                )}
-
-                <h1 className="text-lg font-bold tracking-tight sm:text-xl">
-                  {isTodayBlank
-                    ? "Start logging today's workouts, meals, or sleep"
-                    : analysis.verdictHeadline}
-                </h1>
-                <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
-                  {isTodayBlank
-                    ? "Nothing is pre-filled. Add your lifts, search your food or tap one of your frequent staples, and enter last night's sleep hours to compute Readiness & Recovery."
-                    : analysis.verdictExplanation}
-                </p>
-              </div>
-
-              {/* 4 Key Summary Gauges */}
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 shrink-0">
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                    Readiness
-                  </div>
-                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-emerald-400">
-                    {analysis.readinessScore}%
-                  </div>
-                  <div className="text-[10px] text-[var(--text-muted)]">
-                    Sleep + Strain + Fuel
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                    Gym Strain
-                  </div>
-                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-sky-400">
-                    {analysis.strainScore}
-                    <span className="text-xs font-normal text-[var(--text-muted)]">
-                      /21
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-[var(--text-muted)]">
-                    {currentDay.workout.gymDurationMinutes}m · {analysis.totalSets} sets
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                    Sleep vs Need
-                  </div>
-                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-indigo-400">
-                    {currentDay.sleep.totalHours}h
-                    <span className="text-xs font-normal text-[var(--text-muted)]">
-                      /{analysis.requiredSleepHours}h
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-[var(--text-muted)]">
-                    Deep: {currentDay.sleep.deepSleepHours}h ({analysis.deepSleepPercentage}%)
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-center">
-                  <div className="text-[11px] font-medium text-[var(--text-muted)]">
-                    Fuel &amp; Protein
-                  </div>
-                  <div className="mt-0.5 text-xl font-extrabold tabular-nums text-amber-400">
-                    {currentDay.nutrition.calories}
-                    <span className="text-xs font-normal text-[var(--text-muted)]">
-                      {" "}kcal
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-[var(--text-muted)]">
-                    Protein: <strong className="text-[var(--text-primary)]">{currentDay.nutrition.protein}g</strong> / {currentDay.nutrition.proteinTarget}g
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 3 Pillar Checks: Sleep vs Training Load, Deep Sleep Repair, Fuel & Protein */}
-            <div className="mt-3.5 grid gap-2 sm:grid-cols-3">
-              {Object.entries(analysis.clinicalPillarChecks).map(
-                ([key, check]) => (
-                  <div
-                    key={key}
-                    className="flex items-start gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]/90 p-2.5 text-xs"
-                  >
-                    <span
-                      className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
-                        check.status === "optimal"
-                          ? "bg-emerald-400"
-                          : check.status === "warning"
-                          ? "bg-amber-400"
-                          : "bg-rose-400"
-                      }`}
-                    />
-                    <div>
-                      <div className="font-semibold">{check.label}</div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        {check.detail}
-                      </div>
-                    </div>
-                  </div>
-                )
-              )}
-            </div>
-
-            {/* Daily Rhythm & Gentle Pending Indicators Row */}
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowMorningDrawer(true)}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
-                  isSleepLogged
-                    ? "border-indigo-500/35 bg-indigo-500/10 text-indigo-400"
-                    : "border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25"
-                }`}
-              >
-                <Moon className="h-3 w-3" aria-hidden="true" />
-                <span>
-                  {isSleepLogged
-                    ? `Sleep: ${currentDay.sleep.totalHours}h (${currentDay.sleep.sleepQuality}/10) ✓`
-                    : currentDay.checkIn?.sleepSkipped
-                    ? "Sleep: Skipped · Tap to log"
-                    : "Sleep: Pending · Morning Check-In"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (activeTab !== "all" && activeTab !== "nutrition") {
-                    setActiveTab("nutrition");
-                  }
-                  setTimeout(() => {
-                    nutritionSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  }, 60);
-                }}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
-                  isNutritionLogged
-                    ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-400"
-                    : currentDay.checkIn?.nutritionSkipped
-                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
-                    : "border-amber-500/45 bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
-                }`}
-              >
-                {isNutritionLogged ? (
-                  <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                ) : (
-                  <Bell className="h-3 w-3" aria-hidden="true" />
-                )}
-                <span>
-                  {isNutritionLogged
-                    ? `Nutrition: ${currentDay.nutrition.calories} kcal · ${currentDay.nutrition.protein}g P ✓`
-                    : currentDay.checkIn?.nutritionSkipped
-                    ? "Nutrition: Skipped · Tap to log"
-                    : "Nutrition: Not logged yet · Tap to add"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (activeTab !== "all" && activeTab !== "workout") {
-                    setActiveTab("workout");
-                  }
-                  setTimeout(() => {
-                    workoutSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  }, 60);
-                }}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
-                  isWorkoutLive
-                    ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
-                    : isWorkoutLogged
-                    ? "border-sky-500/35 bg-sky-500/10 text-sky-400"
-                    : currentDay.workout.skipped || currentDay.checkIn?.workoutSkipped
-                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
-                    : "border-sky-500/35 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20"
-                }`}
-              >
-                <Dumbbell className="h-3 w-3" aria-hidden="true" />
-                <span>
-                  {isWorkoutLive
-                    ? `Live Workout · ${Math.floor(liveElapsedSeconds / 60)}m ${String(liveElapsedSeconds % 60).padStart(2, "0")}s`
-                    : isWorkoutLogged
-                    ? `Workout: ${analysis.totalSets} sets${
-                        currentDay.workout.cardioMinutes > 0
-                          ? ` + ${currentDay.workout.cardioMinutes}m cardio`
-                          : ""
-                      }${
-                        currentDay.workout.workoutRating
-                          ? ` · ${currentDay.workout.workoutRating}/10`
-                          : ""
-                      } ✓`
-                    : currentDay.workout.skipped || currentDay.checkIn?.workoutSkipped
-                    ? "Workout: Rest / Skipped"
-                    : "Workout: Pending · Start or Quick Log"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (activeTab !== "all" && activeTab !== "nutrition" && activeTab !== "sleep") {
-                    setActiveTab("all");
-                  }
-                  setTimeout(() => {
-                    habitsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  }, 60);
-                }}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
-                  activeHabits.length > 0 && loggedHabitsCount >= activeHabits.length
-                    ? "border-teal-500/35 bg-teal-500/10 text-teal-400"
-                    : currentDay.checkIn?.habitsSkipped
-                    ? "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
-                    : "border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25"
-                }`}
-              >
-                <ListChecks className="h-3 w-3" aria-hidden="true" />
-                <span>
-                  {activeHabits.length > 0 && loggedHabitsCount >= activeHabits.length
-                    ? `Habits: ${loggedHabitsCount}/${activeHabits.length} ✓`
-                    : currentDay.checkIn?.habitsSkipped
-                    ? `Habits: Skipped (${loggedHabitsCount}/${activeHabits.length})`
-                    : `Habits Journal: ${loggedHabitsCount}/${activeHabits.length} pending`}
-                </span>
-              </button>
-            </div>
-
-            {/* Daily Master Note (Auto-Saved + Explicit Cloud Flush on Blur) */}
-            <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <label
-                  htmlFor="daily-master-note"
-                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-muted)]"
-                >
-                  <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Daily Summary Comment / Check-In</span>
-                </label>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-[var(--text-muted)]">
-                    {syncState === "saving"
-                      ? "Saving..."
-                      : syncState === "local-only"
-                      ? "Saved on device"
-                      : lastSavedTimeLabel
-                      ? `Saved ${lastSavedTimeLabel}`
-                      : "Auto-saved"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void flushSaveNow()}
-                    className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:border-emerald-500/40 transition"
-                  >
-                    Save Note
-                  </button>
-                </div>
-              </div>
-              <textarea
-                id="daily-master-note"
-                rows={1}
-                aria-label="Daily Master Note"
-                placeholder="Type a general daily comment, energy check-in, soreness, or coaching reminder..."
-                value={currentDay.dailyNote}
-                onChange={(e) =>
-                  updateCurrentDay((d) => ({ ...d, dailyNote: e.target.value }))
-                }
-                onBlur={() => void flushSaveNow()}
-                className="auto-grow-textarea w-full bg-transparent text-xs sm:text-sm focus:outline-none"
-              />
-            </div>
-          </section>
-        )}
-
-        {/* =========================================================
-            GEMINI INTERACTIONS API AI HUB (Per-URL & Per-Date Stateful Coach)
-           ========================================================= */}
-        {activeTab === "all" && (
-          <section
-            id="gemini-ai-hub"
-            aria-labelledby="heading-gemini-hub"
-            className="rounded-2xl border border-emerald-500/30 bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-                  <Sparkles className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div className="min-w-0">
-                  <h2
-                    id="heading-gemini-hub"
-                    className="text-base font-bold sm:text-lg"
-                  >
-                    Gemini Interactions AI Hub
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    Stateful Gemini 4 coaching, smart logging &amp; recovery prescriptions synced to{" "}
-                    <code className="text-emerald-400">/u/{slug}</code>
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowAiHub((v) => !v)}
-                  aria-expanded={showAiHub}
-                  aria-controls="gemini-ai-hub-body"
-                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+                  role="tab"
+                  aria-selected={homeSubPage === "summary"}
+                  onClick={() => setHomeSubPage("summary")}
+                  className={`rounded-lg py-1.5 text-xs font-bold transition ${
+                    homeSubPage === "summary"
+                      ? "bg-indigo-500 text-slate-950 shadow-xs"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
                 >
-                  {showAiHub ? (
-                    <>
-                      <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Collapse</span>
-                    </>
-                  ) : (
-                    <>
-                      <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Expand AI Hub</span>
-                    </>
-                  )}
+                  2. Home Summary
                 </button>
-
-                <fieldset className="flex flex-wrap items-center gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1.5">
-                  <legend className="px-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                    Model
-                  </legend>
-                  <div className="inline-flex items-center gap-1.5">
-                    <input
-                      type="radio"
-                      id="model-hydrogen"
-                      name="geminiModel"
-                      value="gemini-4-hydrogen"
-                      checked={geminiModel === "gemini-4-hydrogen"}
-                      onChange={() => setGeminiModel("gemini-4-hydrogen")}
-                      className="h-3.5 w-3.5 accent-emerald-500"
-                    />
-                    <label
-                      htmlFor="model-hydrogen"
-                      className="text-xs font-medium cursor-pointer"
-                    >
-                      gemini-4-hydrogen
-                    </label>
-                  </div>
-                  <div className="inline-flex items-center gap-1.5">
-                    <input
-                      type="radio"
-                      id="model-argon"
-                      name="geminiModel"
-                      value="gemini-4-argon"
-                      checked={geminiModel === "gemini-4-argon"}
-                      onChange={() => setGeminiModel("gemini-4-argon")}
-                      className="h-3.5 w-3.5 accent-emerald-500"
-                    />
-                    <label
-                      htmlFor="model-argon"
-                      className="text-xs font-medium cursor-pointer"
-                    >
-                      gemini-4-argon
-                    </label>
-                  </div>
-                </fieldset>
-
-                <button
-                  type="button"
-                  onClick={handleOptimizeDay}
-                  disabled={geminiLoadingMode !== null}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3.5 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 transition"
-                >
-                  {geminiLoadingMode === "optimize-day" ? (
-                    <>
-                      <RefreshCw
-                        className="h-3.5 w-3.5 animate-spin"
-                        aria-hidden="true"
-                      />
-                      <span>Analyzing...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Wand2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Optimize Day with Gemini</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {showAiHub && (
-              <div id="gemini-ai-hub-body" className="space-y-4">
-                {/* Crystal-Clear Background Workflow Explainer */}
-                <div className="grid gap-2 sm:grid-cols-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 text-[11px] leading-relaxed">
-                  <div>
-                    <span className="font-bold text-emerald-400">
-                      1. Optimize Day with Gemini:
-                    </span>{" "}
-                    Reads today&apos;s workouts, protein/calories &amp; sleep debt on{" "}
-                    <code className="text-[var(--text-primary)]">/api/gemini</code> and generates 3 actionable priorities plus 1-click meal &amp; recovery finishers.
-                  </div>
-                  <div>
-                    <span className="font-bold text-sky-400">
-                      2. Natural-Language Smart Logger:
-                    </span>{" "}
-                    Type plain text like &ldquo;4x8 Squats 90kg + paneer bowl 520 kcal&rdquo;; parses sets, macros, cardio &amp; sleep directly into today&apos;s logs.
-                  </div>
-                  <div>
-                    <span className="font-bold text-indigo-400">
-                      3. Stateful Gemini Coach:
-                    </span>{" "}
-                    Multi-turn recovery chat chained via{" "}
-                    <code>previous_interaction_id</code>. Runs Gemini 4 live when API key is set, or automatic local calculation fallback offline.
-                  </div>
-                </div>
-
-                {geminiStatusMessage && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400"
-              >
-                {geminiStatusMessage}
               </div>
             )}
 
-            {/* Recovery Prescription Output (from Optimize Day) */}
-            {currentDay.aiCoach?.prescription && (
-              <div className="rounded-xl border border-emerald-500/30 bg-[var(--bg-elevated)] p-3.5 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
-                      Daily Recovery Prescription
-                    </div>
-                    <h3 className="text-sm font-bold sm:text-base">
-                      {currentDay.aiCoach.prescription.headline}
-                    </h3>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-muted)] max-w-full">
-                    {currentDay.aiCoach.prescription.model && (
-                      <span className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 font-mono">
-                        {currentDay.aiCoach.prescription.model}
-                      </span>
-                    )}
-                    {currentDay.aiCoach.prescription.interactionId && (
-                      <span
-                        title={currentDay.aiCoach.prescription.interactionId}
-                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 font-mono truncate max-w-[160px]"
-                      >
-                        {currentDay.aiCoach.prescription.interactionId}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <p className="text-xs sm:text-sm text-[var(--text-muted)] leading-relaxed">
-                  {currentDay.aiCoach.prescription.summary}
-                </p>
-
-                {currentDay.aiCoach.prescription.actionItems?.length > 0 && (
-                  <ul className="list-disc pl-5 space-y-1 text-xs text-[var(--text-primary)]">
-                    {currentDay.aiCoach.prescription.actionItems.map(
-                      (item, idx) => (
-                        <li key={idx}>{item}</li>
-                      )
-                    )}
-                  </ul>
-                )}
-
-                <div className="grid gap-2.5 sm:grid-cols-2 pt-1">
-                  {currentDay.aiCoach.prescription.recommendedMeal && (
-                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[11px] font-semibold text-amber-400">
-                            Recommended Recovery Meal
-                          </div>
-                          <div className="text-xs font-bold">
-                            {currentDay.aiCoach.prescription.recommendedMeal.name}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleApplyRecommendedMeal(
-                              currentDay.aiCoach!.prescription!.recommendedMeal!
-                            )
-                          }
-                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-semibold text-amber-400 hover:bg-amber-500/25 transition"
-                        >
-                          <Plus className="h-3 w-3" aria-hidden="true" />
-                          <span>Log Recommended Meal</span>
-                        </button>
-                      </div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        {currentDay.aiCoach.prescription.recommendedMeal.calories} kcal ·{" "}
-                        {currentDay.aiCoach.prescription.recommendedMeal.protein}g P ·{" "}
-                        {currentDay.aiCoach.prescription.recommendedMeal.carbs}g C ·{" "}
-                        {currentDay.aiCoach.prescription.recommendedMeal.fats}g F
-                      </div>
-                    </div>
-                  )}
-
-                  {currentDay.aiCoach.prescription.recommendedExercise && (
-                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[11px] font-semibold text-sky-400">
-                            Recommended Exercise
-                          </div>
-                          <div className="text-xs font-bold">
-                            {currentDay.aiCoach.prescription.recommendedExercise.name}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleApplyRecommendedExercise(
-                              currentDay.aiCoach!.prescription!.recommendedExercise!
-                            )
-                          }
-                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/25 transition"
-                        >
-                          <Plus className="h-3 w-3" aria-hidden="true" />
-                          <span>Add Recommended Exercise</span>
-                        </button>
-                      </div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        {currentDay.aiCoach.prescription.recommendedExercise.sets} sets ×{" "}
-                        {currentDay.aiCoach.prescription.recommendedExercise.reps} reps @{" "}
-                        {currentDay.aiCoach.prescription.recommendedExercise.weight}{" "}
-                        {profile.weightUnit}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* 2-Column Interactive Tools: Smart Logger + Stateful Coach */}
-            <div className="grid gap-4 lg:grid-cols-2">
-              {/* Smart Logger Form */}
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3 min-w-0">
-                <div className="flex items-center gap-2">
-                  <Wand2 className="h-4 w-4 text-sky-400" aria-hidden="true" />
-                  <h3
-                    id="heading-smart-logger"
-                    className="text-sm font-bold"
-                  >
-                    Natural-Language Smart Logger
-                  </h3>
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSmartLogInput(
-                        "Did 4x8 Barbell Squats at 90kg and drank a 40g protein shake (320 kcal)"
-                      )
-                    }
-                    className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] text-[var(--text-muted)] hover:text-sky-400 hover:border-sky-500/40 transition"
-                  >
-                    Sample: Squat + Shake
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSmartLogInput(
-                        "Added 20 min Zone 2 walk and 0.5h extra sleep"
-                      )
-                    }
-                    className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] text-[var(--text-muted)] hover:text-sky-400 hover:border-sky-500/40 transition"
-                  >
-                    Sample: Cardio + Sleep
-                  </button>
-                </div>
-
-                <form
-                  aria-labelledby="heading-smart-logger"
-                  onSubmit={handleSmartLogSubmit}
-                  className="space-y-2"
-                >
-                  <label
-                    htmlFor="smart-log-input"
-                    className="block text-xs font-medium text-[var(--text-muted)]"
-                  >
-                    Describe workouts, meals, or sleep updates
-                  </label>
-                  <textarea
-                    ref={smartLogTextareaRef}
-                    id="smart-log-input"
-                    name="smartLog"
-                    value={smartLogInput}
-                    onChange={(e) => {
-                      setSmartLogInput(e.target.value);
-                      if (smartLogError) setSmartLogError("");
-                    }}
-                    onKeyDown={handleTextareaKeyDown}
-                    aria-invalid={Boolean(smartLogError)}
-                    aria-describedby={
-                      smartLogError ? "smart-log-error" : "smart-log-hint"
-                    }
-                    placeholder="e.g., Did 3x10 Romanian Deadlift at 80kg and ate a chicken bowl (650 kcal, 52g protein)"
-                    className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs sm:text-sm focus:border-sky-500 focus:outline-none"
-                  />
-                  <p
-                    id="smart-log-hint"
-                    className="text-[11px] text-[var(--text-muted)]"
-                  >
-                    Press Enter to log with Gemini · Shift+Enter for a new line.
-                  </p>
-                  {smartLogError && (
-                    <p
-                      id="smart-log-error"
-                      role="alert"
-                      className="text-xs font-medium text-rose-400"
-                    >
-                      {smartLogError}
-                    </p>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={geminiLoadingMode !== null}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-60 transition"
-                  >
-                    {geminiLoadingMode === "smart-log" ? (
-                      <>
-                        <RefreshCw
-                          className="h-3.5 w-3.5 animate-spin"
-                          aria-hidden="true"
-                        />
-                        <span>Parsing...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Smart Log to /u/{slug}</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              </div>
-
-              {/* Stateful Gemini Coach Form */}
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3 min-w-0">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Bot
-                      className="h-4 w-4 text-emerald-400"
-                      aria-hidden="true"
-                    />
-                    <h3
-                      id="heading-coach-chat"
-                      className="text-sm font-bold"
-                    >
-                      Stateful Gemini Coach
-                    </h3>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {currentDay.aiCoach?.lastInteractionId && (
-                      <span
-                        title={currentDay.aiCoach.lastInteractionId}
-                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] font-mono text-[var(--text-muted)] truncate max-w-[120px]"
-                      >
-                        {currentDay.aiCoach.lastInteractionId}
-                      </span>
-                    )}
-                    {(currentDay.aiCoach?.messages?.length || 0) > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleResetCoachThread}
-                        className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-muted)] hover:text-emerald-400 transition"
-                      >
-                        <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                        <span>New Thread</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Conversation Thread */}
-                <div className="max-h-56 overflow-y-auto space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
-                  {!currentDay.aiCoach?.messages?.length ? (
+            {/* SUB-PAGE 1A: MORNING CHECK-IN (Sleep Duration + Full 1-10 Grid + Empty Weight/BF Nudge) */}
+            {(desktopFullView || homeSubPage === "checkin") && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h1 className="text-base sm:text-lg font-extrabold tracking-tight">
+                      Home · Morning Check-In
+                    </h1>
                     <p className="text-xs text-[var(--text-muted)]">
-                      Ask about today&apos;s {analysis.strainScore}/21 strain,
-                      how much protein/sleep you still need, or progression for{" "}
-                      <code className="text-emerald-400">/u/{slug}</code>. Follow-ups automatically chain via{" "}
-                      <code>previous_interaction_id</code>.
+                      Enter last night&apos;s sleep &amp; today&apos;s scale weight to calibrate Home readiness.
                     </p>
-                  ) : (
-                    <ul className="space-y-2">
-                      {currentDay.aiCoach.messages.map((msg) => (
-                        <li
-                          key={msg.id}
-                          className={`rounded-lg px-2.5 py-2 text-xs leading-relaxed ${
-                            msg.role === "user"
-                              ? "border border-emerald-500/30 bg-emerald-500/10"
-                              : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
-                          }`}
-                        >
-                          <div className="mb-0.5 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                            <span>
-                              {msg.role === "user" ? "You" : "Gemini Coach"}
-                            </span>
-                            {msg.model && <span>{msg.model}</span>}
-                          </div>
-                          <div className="whitespace-pre-wrap break-words">
-                            {msg.text}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  </div>
+                  <span className="shrink-0 rounded-full border border-indigo-500/35 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-400">
+                    {selectedDate}
+                  </span>
                 </div>
 
-                <form
-                  aria-labelledby="heading-coach-chat"
-                  onSubmit={handleCoachSubmit}
-                  className="space-y-2"
-                >
-                  <label
-                    htmlFor="coach-chat-input"
-                    className="block text-xs font-medium text-[var(--text-muted)]"
-                  >
-                    Ask your Gemini coach (multi-turn memory)
-                  </label>
-                  <textarea
-                    ref={coachTextareaRef}
-                    id="coach-chat-input"
-                    name="coachPrompt"
-                    value={coachInput}
-                    onChange={(e) => {
-                      setCoachInput(e.target.value);
-                      if (coachError) setCoachError("");
-                    }}
-                    onKeyDown={handleTextareaKeyDown}
-                    aria-invalid={Boolean(coachError)}
-                    aria-describedby={
-                      coachError ? "coach-chat-error" : "coach-chat-hint"
-                    }
-                    placeholder="e.g., Is my 1.6h deep sleep enough for today's bench & pulldown volume?"
-                    className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs sm:text-sm focus:border-emerald-500 focus:outline-none"
-                  />
-                  <p
-                    id="coach-chat-hint"
-                    className="text-[11px] text-[var(--text-muted)]"
-                  >
-                    Press Enter to send · Shift+Enter for a new line.
-                  </p>
-                  {coachError && (
-                    <p
-                      id="coach-chat-error"
-                      role="alert"
-                      className="text-xs font-medium text-rose-400"
+                {/* Sleep Duration Card */}
+                <div className="rounded-2xl border border-indigo-500/35 bg-[var(--bg-surface)] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="sleep-total"
+                      className="text-xs font-bold text-[var(--text-primary)]"
                     >
-                      {coachError}
-                    </p>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={geminiLoadingMode !== null}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 transition"
-                  >
-                    {geminiLoadingMode === "coach" ? (
-                      <>
-                        <RefreshCw
-                          className="h-3.5 w-3.5 animate-spin"
-                          aria-hidden="true"
-                        />
-                        <span>Thinking...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Ask Coach</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              </div>
-            </div>
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* =========================================================
-            HISTORY & MULTI-DAY PERFORMANCE TRENDS (7d / 14d / 30d)
-           ========================================================= */}
-        {activeTab === "history" && (
-          <section
-            aria-labelledby="heading-history"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-5"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-                  <History className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2
-                    id="heading-history"
-                    className="text-base font-bold sm:text-lg"
-                  >
-                    History &amp; Multi-Day Trends
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    Consolidated performance across Workouts, Nutrition &amp; Sleep ending{" "}
-                    <strong className="text-[var(--text-primary)]">{selectedDate}</strong>
-                  </p>
-                </div>
-              </div>
-
-              {/* Timeframe Switcher: Week / 2 Weeks / Month */}
-              <div
-                role="group"
-                aria-label="History Timeframe"
-                className="inline-flex items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1"
-              >
-                {(
-                  [
-                    { days: 7, label: "7 Days (Week)" },
-                    { days: 14, label: "14 Days (2 Weeks)" },
-                    { days: 30, label: "30 Days (Month)" },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.days}
-                    type="button"
-                    onClick={() => setHistoryWindowDays(opt.days)}
-                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
-                      historyWindowDays === opt.days
-                        ? "bg-emerald-500 text-slate-950"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {periodSummary.loggedDaysCount === 0 ? (
-              <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-6 text-center space-y-2">
-                <div className="text-sm font-semibold">
-                  No logged days found between {periodSummary.startDate} and {periodSummary.endDate}
-                </div>
-                <p className="text-xs text-[var(--text-muted)] max-w-md mx-auto">
-                  Log workouts, meals, or sleep on any day and switch back here to inspect weekly, 2-week, and monthly averages, lift weight progression, and saved notes.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("all")}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 transition"
-                >
-                  Log Today&apos;s Data
-                </button>
-              </div>
-            ) : (
-              <>
-                {/* Consolidated KPI Grid */}
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400">
-                      Workouts ({historyWindowDays}d)
-                    </div>
-                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
-                      {periodSummary.workoutDaysCount} sessions
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--text-muted)]">
-                      {periodSummary.totalSets} sets · {periodSummary.totalReps} reps · {periodSummary.totalGymMinutes}m gym + {periodSummary.totalCardioMinutes}m cardio
+                      Last Night&apos;s Sleep (0–23 hrs)
+                    </label>
+                    <div className="flex items-baseline gap-1.5">
+                      <DecimalInput
+                        id="sleep-total"
+                        allowDecimal
+                        min={0}
+                        max={23}
+                        value={currentDay.sleep.totalHours}
+                        onValueChange={(nextHours) =>
+                          updateSleepWith70kgIndianBaseline(
+                            nextHours,
+                            currentDay.sleep.sleepQuality
+                          )
+                        }
+                        onBlur={() => void flushSaveNow()}
+                        className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-right text-xl font-extrabold tabular-nums text-indigo-400 focus:border-indigo-400 focus:outline-none"
+                      />
+                      <span className="text-xs text-[var(--text-muted)]">hrs</span>
                     </div>
                   </div>
 
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">
-                      Nutrition Avg / Day
-                    </div>
-                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
-                      {periodSummary.avgCalories} kcal
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--text-muted)]">
-                      Avg Protein: <strong className="text-[var(--text-primary)]">{periodSummary.avgProtein}g</strong> · Carbs {periodSummary.avgCarbs}g · Fats {periodSummary.avgFats}g ({periodSummary.proteinTargetHitDays}/{periodSummary.nutritionDaysCount} days &ge;90% goal)
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
-                      Sleep Avg / Night
-                    </div>
-                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
-                      {periodSummary.avgSleepHours}h · {periodSummary.avgSleepQuality}/10
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--text-muted)]">
-                      Avg RHR: {periodSummary.avgRestingHr || "--"} bpm · Avg HRV: {periodSummary.avgHrvMs || "--"} ms
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
-                      Recovery Consistency
-                    </div>
-                    <div className="mt-1 text-2xl font-extrabold tabular-nums">
-                      {periodSummary.avgReadinessScore}% avg
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--text-muted)]">
-                      {periodSummary.optimalDays} Optimal · {periodSummary.moderateDays} Moderate · {periodSummary.deficitDays} Deficit days
-                    </div>
-                  </div>
-                </div>
-
-                {/* Lift Progression Tracker */}
-                {periodSummary.exerciseProgression.length > 0 && (
-                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400">
-                        Top Exercise Progression ({periodSummary.startDate} to {periodSummary.endDate})
-                      </h3>
-                      <span className="text-[11px] text-[var(--text-muted)]">
-                        Comparing first vs. latest top set
-                      </span>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {periodSummary.exerciseProgression.slice(0, 9).map((ex) => (
-                        <div
-                          key={ex.name}
-                          className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-xs"
-                        >
-                          <div className="min-w-0">
-                            <div className="font-semibold truncate">{ex.name}</div>
-                            <div className="text-[10px] text-[var(--text-muted)]">
-                              {ex.sessionsCount} sessions · Latest {ex.latestDate}
-                            </div>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <div className="font-bold tabular-nums">
-                              {ex.latestWeight} {profile.weightUnit} × {ex.latestReps}
-                            </div>
-                            <div
-                              className={`text-[10px] font-semibold ${
-                                ex.weightDelta > 0
-                                  ? "text-emerald-400"
-                                  : ex.weightDelta < 0
-                                  ? "text-amber-400"
-                                  : "text-[var(--text-muted)]"
-                              }`}
-                            >
-                              {ex.weightDelta > 0
-                                ? `+${ex.weightDelta} ${profile.weightUnit}`
-                                : ex.weightDelta < 0
-                                ? `${ex.weightDelta} ${profile.weightUnit}`
-                                : `Matched ${ex.earliestWeight} ${profile.weightUnit}`}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Day-by-Day In-Depth Overview */}
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                      Day-by-Day Breakdown &amp; Saved Notes ({periodSummary.dailyRows.length} logged days)
-                    </h3>
-                  </div>
-                  <div className="space-y-2">
-                    {periodSummary.dailyRows.map((row) => (
-                      <div
-                        key={row.date}
-                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-2"
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                    {[5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9].map((hrs) => (
+                      <button
+                        key={hrs}
+                        type="button"
+                        aria-pressed={currentDay.sleep.totalHours === hrs}
+                        onClick={() =>
+                          updateSleepWith70kgIndianBaseline(
+                            hrs,
+                            currentDay.sleep.sleepQuality
+                          )
+                        }
+                        className={`rounded-lg py-1.5 text-xs font-bold border transition ${
+                          currentDay.sleep.totalHours === hrs
+                            ? "border-indigo-400 bg-indigo-500 text-slate-950"
+                            : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-indigo-400/50"
+                        }`}
                       >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-xs font-bold text-emerald-400">
-                              {row.date}
-                            </span>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
-                                row.verdictLevel === "optimal"
-                                  ? "bg-emerald-500/20 text-emerald-400"
-                                  : row.verdictLevel === "moderate"
-                                  ? "bg-amber-500/20 text-amber-400"
-                                  : "bg-rose-500/20 text-rose-400"
-                              }`}
-                            >
-                              Readiness {row.readinessScore}% · Strain {row.strainScore}/21
-                            </span>
-                            <span className="text-xs font-medium truncate max-w-[240px]">
-                              {row.workoutTitle}
-                            </span>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedDate(row.date);
-                              setActiveTab("all");
-                            }}
-                            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20 transition"
-                          >
-                            Open Day
-                          </button>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
-                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
-                            <span className="text-[var(--text-muted)]">Workouts: </span>
-                            <strong>{row.totalSets} sets</strong> · {row.totalReps} reps · {row.gymMinutes + row.cardioMinutes}m
-                          </div>
-                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
-                            <span className="text-[var(--text-muted)]">Fuel: </span>
-                            <strong>{row.calories} kcal</strong> · {row.protein}g P ({row.mealsCount} meals)
-                          </div>
-                          <div className="rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5">
-                            <span className="text-[var(--text-muted)]">Sleep: </span>
-                            <strong>{row.sleepHours}h</strong> ({row.sleepQuality}/10) · HRV {row.hrvMs}ms
-                          </div>
-                        </div>
-
-                        {row.allNotesSummary.length > 0 && (
-                          <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 space-y-1 text-[11px]">
-                            {row.allNotesSummary.map((n, nIdx) => (
-                              <div key={nIdx}>
-                                <span className="font-semibold text-emerald-400">
-                                  {n.area}:{" "}
-                                </span>
-                                <span className="text-[var(--text-muted)]">
-                                  {n.text}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                        {hrs}h
+                      </button>
                     ))}
                   </div>
                 </div>
-              </>
+
+                {/* Full 1-10 Sleep Score (2 Rows x 5 Cols) */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold">Sleep Score (1–10)</span>
+                    <span className="text-xs font-extrabold text-amber-400 tabular-nums">
+                      {currentDay.sleep.sleepQuality} / 10
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        aria-label={`Rate sleep quality ${q} out of 10`}
+                        aria-pressed={currentDay.sleep.sleepQuality === q}
+                        onClick={() =>
+                          updateSleepWith70kgIndianBaseline(
+                            currentDay.sleep.totalHours,
+                            q
+                          )
+                        }
+                        className={`rounded-lg py-2 text-xs font-bold border transition ${
+                          currentDay.sleep.sleepQuality === q
+                            ? "border-amber-400 bg-amber-500 text-slate-950"
+                            : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-amber-400/50"
+                        }`}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-[var(--bg-elevated)] p-2 text-center text-[11px]">
+                    <div>
+                      <span className="text-[var(--text-muted)]">Deep </span>
+                      <strong className="text-emerald-400 tabular-nums">
+                        {currentDay.sleep.deepSleepHours}h
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-[var(--text-muted)]">REM </span>
+                      <strong className="text-sky-400 tabular-nums">
+                        {currentDay.sleep.remSleepHours}h
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-[var(--text-muted)]">RHR/HRV </span>
+                      <strong className="text-teal-400 tabular-nums">
+                        {currentDay.sleep.restingHeartRate || "--"}/
+                        {currentDay.sleep.hrvMs || "--"}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Body Metrics Card (Empty Inputs + Staleness Nudge) */}
+                <div
+                  className={`rounded-2xl border bg-[var(--bg-surface)] p-3.5 space-y-2.5 ${
+                    isWeightLoggedToday
+                      ? "border-emerald-500/40"
+                      : "border-amber-500/50"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold">
+                      Enter Today&apos;s Body Metrics
+                    </span>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                        isWeightLoggedToday
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : "bg-amber-500/15 text-amber-400"
+                      }`}
+                    >
+                      {isWeightLoggedToday
+                        ? "✓ Weight logged today"
+                        : lastWeightRef
+                        ? `⚠ Weight not logged in ${lastWeightRef.daysAgo} ${
+                            lastWeightRef.daysAgo === 1 ? "day" : "days"
+                          }`
+                        : "⚠ Weight not logged yet"}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="checkin-body-weight"
+                        className="block text-[11px] font-medium text-[var(--text-muted)]"
+                      >
+                        Weight ({profile.weightUnit})
+                      </label>
+                      <DecimalInput
+                        id="checkin-body-weight"
+                        allowDecimal
+                        showEmptyWhenZero
+                        min={0}
+                        max={400}
+                        placeholder={`Enter ${profile.weightUnit}`}
+                        value={currentDay.bodyMetrics?.weight ?? 0}
+                        onValueChange={(val) => {
+                          updateCurrentDay((d) => ({
+                            ...d,
+                            bodyMetrics: {
+                              ...d.bodyMetrics,
+                              weight: val > 0 ? val : undefined,
+                              updatedAt: new Date().toISOString(),
+                            },
+                          }));
+                          if (val > 0) {
+                            updateProfileMeta((p) => ({
+                              ...p,
+                              bodyweight: val,
+                            }));
+                          }
+                        }}
+                        onBlur={() => void flushSaveNow()}
+                        className={`w-full rounded-xl border border-dashed bg-[var(--bg-elevated)] px-3 py-2 text-sm font-extrabold tabular-nums placeholder:font-medium placeholder:text-[var(--text-muted)] focus:outline-none ${
+                          isWeightLoggedToday
+                            ? "border-emerald-500/60 text-emerald-400"
+                            : "border-amber-500/70 text-[var(--text-primary)]"
+                        }`}
+                      />
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        {lastWeightRef
+                          ? `Last: ${lastWeightRef.value} ${profile.weightUnit} · ${lastWeightRef.daysAgo}d ago`
+                          : "Not logged on prior days"}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="checkin-body-fat"
+                        className="block text-[11px] font-medium text-[var(--text-muted)]"
+                      >
+                        Body Fat (%) · Optional
+                      </label>
+                      <DecimalInput
+                        id="checkin-body-fat"
+                        allowDecimal
+                        showEmptyWhenZero
+                        min={0}
+                        max={60}
+                        placeholder="Enter %"
+                        value={currentDay.bodyMetrics?.bodyFatPct ?? 0}
+                        onValueChange={(val) => {
+                          updateCurrentDay((d) => ({
+                            ...d,
+                            bodyMetrics: {
+                              ...d.bodyMetrics,
+                              bodyFatPct: val > 0 ? val : undefined,
+                              updatedAt: new Date().toISOString(),
+                            },
+                          }));
+                          if (val > 0) {
+                            updateProfileMeta((p) => ({
+                              ...p,
+                              bodyFatPct: val,
+                            }));
+                          }
+                        }}
+                        onBlur={() => void flushSaveNow()}
+                        className="w-full rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm font-extrabold tabular-nums text-sky-400 placeholder:font-medium placeholder:text-[var(--text-muted)] focus:border-sky-400 focus:outline-none"
+                      />
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        {lastBodyFatRef
+                          ? `Last: ${lastBodyFatRef.value}% · ${lastBodyFatRef.daysAgo}d ago`
+                          : "Log every week or two"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Check-In Actions */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        checkIn: {
+                          ...d.checkIn,
+                          sleepSkipped: false,
+                          morningCompletedAt: new Date().toISOString(),
+                        },
+                      }));
+                      void flushSaveNow();
+                      setHomeSubPage("summary");
+                    }}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-3 text-xs sm:text-sm font-bold text-slate-950 hover:bg-emerald-400 transition shadow-xs"
+                  >
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                    <span>Save &amp; Go to Home &rarr;</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        checkIn: { ...d.checkIn, sleepSkipped: true },
+                      }));
+                      setHomeSubPage("summary");
+                    }}
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-3 text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
+                  >
+                    Skip Sleep
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-PAGE 1B: HOME SUMMARY (Readiness Gauges, 3 Pillars, Collapsible Note & Advanced Sleep) */}
+            {(desktopFullView || homeSubPage === "summary") && (
+              <div className="space-y-3">
+                {/* Afternoon Sleep Nudge (>= 14:00 if unlogged) */}
+                {!isSleepLogged &&
+                  selectedDate === todayStr &&
+                  currentHour >= 14 && (
+                    <div
+                      role="status"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+                    >
+                      <div className="flex items-center gap-2 text-amber-300">
+                        <Bell className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                        <span>
+                          <strong>Afternoon Sleep Nudge:</strong> Enter last night&apos;s sleep to calibrate Readiness &amp; HRV.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setHomeSubPage("checkin")}
+                        className="rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-slate-950"
+                      >
+                        Enter Sleep
+                      </button>
+                    </div>
+                  )}
+
+                {/* Semantic Sufficiency Status Banner */}
+                <div
+                  className={`rounded-2xl border p-3.5 space-y-3 ${
+                    isTodayBlank
+                      ? "border-[var(--border-subtle)] bg-[var(--bg-surface)]"
+                      : analysis.verdictLevel === "optimal"
+                      ? "border-emerald-500/40 bg-emerald-500/5"
+                      : analysis.verdictLevel === "moderate"
+                      ? "border-amber-500/40 bg-amber-500/5"
+                      : "border-rose-500/40 bg-rose-500/5"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider ${
+                        isTodayBlank
+                          ? "bg-sky-500/15 text-sky-400"
+                          : analysis.verdictLevel === "optimal"
+                          ? "bg-emerald-500/20 text-emerald-400"
+                          : analysis.verdictLevel === "moderate"
+                          ? "bg-amber-500/20 text-amber-400"
+                          : "bg-rose-500/20 text-rose-400"
+                      }`}
+                    >
+                      {isTodayBlank ? (
+                        <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : analysis.verdictLevel === "optimal" ? (
+                        <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : analysis.verdictLevel === "moderate" ? (
+                        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : (
+                        <AlertOctagon className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      {isTodayBlank
+                        ? "Ready to Log Today"
+                        : analysis.verdictLevel === "optimal"
+                        ? "Optimal Recovery Loop"
+                        : analysis.verdictLevel === "moderate"
+                        ? "Borderline Sufficiency"
+                        : "Recovery / Fueling Deficit"}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => setHomeSubPage("checkin")}
+                      className="text-[11px] font-semibold text-indigo-400 hover:underline"
+                    >
+                      Edit Check-In
+                    </button>
+                  </div>
+
+                  {/* 2x2 Big-Number Gauges */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Readiness
+                      </div>
+                      <div className="text-xl font-extrabold tabular-nums text-emerald-400">
+                        {analysis.readinessScore}%
+                      </div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        HRV {currentDay.sleep.hrvMs || "--"} ms
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Workout Strain
+                      </div>
+                      <div className="text-xl font-extrabold tabular-nums text-sky-400">
+                        {analysis.strainScore}
+                        <span className="text-xs font-normal text-[var(--text-muted)]">
+                          /21
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        {analysis.totalSets} sets · {currentDay.workout.gymDurationMinutes}m
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Sleep vs Need
+                      </div>
+                      <div className="text-xl font-extrabold tabular-nums text-indigo-400">
+                        {currentDay.sleep.totalHours}h
+                        <span className="text-xs font-normal text-[var(--text-muted)]">
+                          /{analysis.requiredSleepHours}h
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        Deep {currentDay.sleep.deepSleepHours}h ({analysis.deepSleepPercentage}%)
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Fuel &amp; Weight
+                      </div>
+                      <div className="text-xl font-extrabold tabular-nums text-amber-400">
+                        {currentDay.nutrition.calories}
+                        <span className="text-xs font-normal text-[var(--text-muted)]">
+                          {" "}kcal
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        {currentDay.nutrition.protein}g P ·{" "}
+                        {isWeightLoggedToday
+                          ? `${currentDay.bodyMetrics?.weight}${profile.weightUnit}`
+                          : lastWeightRef
+                          ? `Wt ${lastWeightRef.daysAgo}d ago`
+                          : "Wt unlogged"}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 3 Compact 1-Line Pillar Status Rows */}
+                  <div className="space-y-1.5">
+                    {Object.entries(analysis.clinicalPillarChecks).map(
+                      ([key, check]) => (
+                        <div
+                          key={key}
+                          className="flex items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className={`h-2 w-2 shrink-0 rounded-full ${
+                                check.status === "optimal"
+                                  ? "bg-emerald-400"
+                                  : check.status === "warning"
+                                  ? "bg-amber-400"
+                                  : "bg-rose-400"
+                              }`}
+                            />
+                            <span className="font-semibold truncate">
+                              {check.label}
+                            </span>
+                          </div>
+                          <span className="shrink-0 text-[11px] text-[var(--text-muted)]">
+                            {check.status === "optimal"
+                              ? "Optimal ✓"
+                              : check.status === "warning"
+                              ? "Watch"
+                              : "Deficit"}
+                          </span>
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {/* Quick Jump Row */}
+                  {!desktopFullView && (
+                    <div className="grid grid-cols-2 gap-2 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setActiveScreen("workouts")}
+                        className="rounded-xl bg-sky-500 py-2.5 text-xs font-bold text-slate-950 hover:bg-sky-400 transition"
+                      >
+                        Go to Workout &rarr;
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveScreen("nutrition")}
+                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] py-2.5 text-xs font-bold hover:border-amber-400/50 transition"
+                      >
+                        Log Nutrition &rarr;
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Collapsible Daily Summary Note (Native <details>, no heading inside <summary>) */}
+                <details className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5">
+                  <summary className="flex items-center justify-between gap-2 cursor-pointer list-none text-xs font-semibold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <FileText className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                      <span>Daily Summary Note</span>
+                      {currentDay.dailyNote.trim() && (
+                        <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-400">
+                          Saved
+                        </span>
+                      )}
+                    </span>
+                    <ChevronDown className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
+                  </summary>
+                  <div className="mt-2.5 space-y-2">
+                    <textarea
+                      id="daily-master-note"
+                      rows={2}
+                      aria-label="Daily Master Note"
+                      placeholder="Type a general daily comment, soreness check-in, or reminder..."
+                      value={currentDay.dailyNote}
+                      onChange={(e) =>
+                        updateCurrentDay((d) => ({ ...d, dailyNote: e.target.value }))
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-emerald-500 focus:outline-none"
+                    />
+                    <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)]">
+                      <span>
+                        {lastSavedTimeLabel ? `Saved ${lastSavedTimeLabel}` : "Auto-saved"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void flushSaveNow()}
+                        className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400"
+                      >
+                        Save Note
+                      </button>
+                    </div>
+                  </div>
+                </details>
+
+                {/* Collapsible Advanced Sleep Biometrics & Wearable Overrides */}
+                <details className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5">
+                  <summary className="flex items-center justify-between gap-2 cursor-pointer list-none text-xs font-semibold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Moon className="h-3.5 w-3.5 text-indigo-400" aria-hidden="true" />
+                      <span>Advanced Sleep Biometrics &amp; Wearable Overrides</span>
+                    </span>
+                    <ChevronDown className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <label htmlFor="baseline-sleep-need" className="text-[var(--text-muted)]">
+                        Base Sleep Need (hrs):
+                      </label>
+                      <DecimalInput
+                        id="baseline-sleep-need"
+                        allowDecimal
+                        min={4}
+                        max={14}
+                        value={profile.baselineSleepNeedHours}
+                        onValueChange={(nextBase) =>
+                          updateProfileMeta((p) => ({
+                            ...p,
+                            baselineSleepNeedHours: nextBase > 0 ? nextBase : 7.5,
+                          }))
+                        }
+                        onBlur={() => void flushSaveNow()}
+                        className="w-16 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-center font-bold text-indigo-400"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
+                        <label htmlFor="sleep-deep" className="block text-[10px] text-[var(--text-muted)]">
+                          Deep Sleep (hrs)
+                        </label>
+                        <DecimalInput
+                          id="sleep-deep"
+                          allowDecimal
+                          min={0}
+                          max={12}
+                          value={currentDay.sleep.deepSleepHours}
+                          onValueChange={(val) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              sleep: { ...d.sleep, deepSleepHours: val },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="mt-1 w-full bg-transparent text-lg font-extrabold tabular-nums text-emerald-400 focus:outline-none"
+                        />
+                      </div>
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
+                        <label htmlFor="sleep-rem" className="block text-[10px] text-[var(--text-muted)]">
+                          REM Sleep (hrs)
+                        </label>
+                        <DecimalInput
+                          id="sleep-rem"
+                          allowDecimal
+                          min={0}
+                          max={12}
+                          value={currentDay.sleep.remSleepHours}
+                          onValueChange={(val) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              sleep: { ...d.sleep, remSleepHours: val },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="mt-1 w-full bg-transparent text-lg font-bold tabular-nums text-sky-400 focus:outline-none"
+                        />
+                      </div>
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
+                        <label htmlFor="sleep-rhr" className="block text-[10px] text-[var(--text-muted)]">
+                          Resting HR (bpm)
+                        </label>
+                        <DecimalInput
+                          id="sleep-rhr"
+                          allowDecimal={false}
+                          min={0}
+                          max={180}
+                          value={currentDay.sleep.restingHeartRate}
+                          onValueChange={(val) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              sleep: { ...d.sleep, restingHeartRate: Math.round(val) },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="mt-1 w-full bg-transparent text-lg font-bold tabular-nums text-rose-400 focus:outline-none"
+                        />
+                      </div>
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
+                        <label htmlFor="sleep-hrv" className="block text-[10px] text-[var(--text-muted)]">
+                          HRV (ms)
+                        </label>
+                        <DecimalInput
+                          id="sleep-hrv"
+                          allowDecimal={false}
+                          min={0}
+                          max={250}
+                          value={currentDay.sleep.hrvMs}
+                          onValueChange={(val) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              sleep: { ...d.sleep, hrvMs: Math.round(val) },
+                            }))
+                          }
+                          onBlur={() => void flushSaveNow()}
+                          className="mt-1 w-full bg-transparent text-lg font-bold tabular-nums text-teal-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <textarea
+                      id="sleep-note"
+                      aria-label="Sleep Hygiene and Recovery Notes"
+                      placeholder="Sleep hygiene notes (late meals, caffeine, room temp)..."
+                      value={currentDay.sleep.note}
+                      onChange={(e) =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          sleep: { ...d.sleep, note: e.target.value },
+                        }))
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </details>
+              </div>
             )}
           </section>
         )}
 
         {/* =========================================================
-            MODULE 1: WORKOUTS (Simple Exercise, Weight & Reps Tracker)
+            SCREEN 2: WORKOUTS — WHOOP 5.0 STRENGTH TRAINER
            ========================================================= */}
-        {(activeTab === "all" || activeTab === "workout") && (
-          <section
-            ref={workoutSectionRef}
-            aria-labelledby="heading-workouts"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400">
-                  <Dumbbell className="h-5 w-5" aria-hidden="true" />
+        {showWorkouts && (
+          <section aria-label="Workouts Screen" className="space-y-3">
+            {/* Pinned Same-Screen WHOOP 5.0 Live Activity HUD */}
+            {isWorkoutLive ? (
+              <div className="rounded-2xl border border-emerald-500/50 bg-emerald-500/10 p-3.5 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                          WHOOP Strength Live
+                        </span>
+                        <span className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-bold text-amber-400 tabular-nums">
+                          {currentDay.workout.inSetActive
+                            ? "ACTIVE SET"
+                            : `REST ${formatMMSS(restElapsedSeconds)}`}
+                        </span>
+                      </div>
+                      <div className="text-2xl font-extrabold tabular-nums leading-tight">
+                        {formatMMSS(liveElapsedSeconds)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={toggleActiveSetState}
+                      className={`rounded-xl px-3 py-2 text-xs font-bold transition ${
+                        currentDay.workout.inSetActive
+                          ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
+                          : "bg-sky-500 text-slate-950 hover:bg-sky-400"
+                      }`}
+                    >
+                      {currentDay.workout.inSetActive ? "✓ End Set" : "▶ Start Set"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopLiveWorkout}
+                      className="inline-flex items-center gap-1 rounded-xl bg-rose-500 px-3 py-2 text-xs font-bold text-white hover:bg-rose-400 transition"
+                    >
+                      <Square className="h-3 w-3 fill-current" aria-hidden="true" />
+                      <span>End</span>
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <h2
-                    id="heading-workouts"
-                    className="text-base font-bold sm:text-lg"
-                  >
-                    1. Workouts
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    WHOOP-style Live Timer, Routines &amp; Exercise logger ·{" "}
-                    <strong className="text-[var(--text-primary)]">
+
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-2 text-[11px] text-[var(--text-muted)]">
+                  <span>
+                    Muscular Load{" "}
+                    <strong className="text-sky-400 tabular-nums">
+                      {muscularLoadPct}%
+                    </strong>
+                  </span>
+                  <span>
+                    Strain{" "}
+                    <strong className="text-emerald-400 tabular-nums">
+                      {analysis.strainScore}/21
+                    </strong>
+                  </span>
+                  <span>
+                    <strong className="text-[var(--text-primary)] tabular-nums">
                       {analysis.totalSets} sets
                     </strong>{" "}
-                    ({analysis.totalReps} completed reps)
-                  </p>
+                    ·{" "}
+                    <strong className="text-[var(--text-primary)] tabular-nums">
+                      {analysis.totalVolume.toLocaleString()} {profile.weightUnit}
+                    </strong>
+                  </span>
                 </div>
               </div>
+            ) : (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400">
+                    <Dumbbell className="h-5 w-5" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-sm sm:text-base font-bold truncate">
+                      {currentDay.workout.sessionTitle || "Workouts · WHOOP Strength"}
+                    </h2>
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      {analysis.totalSets} sets · {analysis.totalVolume.toLocaleString()}{" "}
+                      {profile.weightUnit} · Strain {analysis.strainScore}/21
+                    </div>
+                  </div>
+                </div>
 
-              {/* Live Timer + Unit Toggle + Previous Session Carryover + Skip + Add Exercise */}
-              <div className="flex flex-wrap items-center gap-2">
-                {isWorkoutLive ? (
-                  <button
-                    type="button"
-                    onClick={stopLiveWorkout}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-400 transition shadow-xs"
-                  >
-                    <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
-                    <span>
-                      Stop Workout ({Math.floor(liveElapsedSeconds / 60)}:
-                      {String(liveElapsedSeconds % 60).padStart(2, "0")})
-                    </span>
-                  </button>
-                ) : (
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     onClick={startLiveWorkout}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
                   >
                     <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
                     <span>Start Workout</span>
                   </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={skipWorkoutToday}
-                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
-                    currentDay.workout.skipped
-                      ? "border-sky-500/50 bg-sky-500/15 text-sky-400"
-                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>{currentDay.workout.skipped ? "Rest Day ✓" : "Skip / Rest"}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateProfileMeta((p) => ({
-                      ...p,
-                      weightUnit: p.weightUnit === "kg" ? "lbs" : "kg",
-                    }))
-                  }
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-semibold hover:border-sky-500/40"
-                >
-                  Unit: {profile.weightUnit.toUpperCase()}
-                </button>
-                {previousWorkoutSession && (
                   <button
                     type="button"
-                    onClick={loadPreviousWorkoutIntoToday}
-                    title={`Load ${previousWorkoutSession.sessionTitle} from ${previousWorkoutSession.sourceDate} with previous weights & reps`}
-                    className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-1.5 text-xs font-semibold text-sky-400 hover:bg-sky-500/20 transition"
+                    onClick={() =>
+                      updateProfileMeta((p) => ({
+                        ...p,
+                        weightUnit: p.weightUnit === "kg" ? "lbs" : "kg",
+                      }))
+                    }
+                    className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs font-bold"
                   >
-                    <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>
-                      Load Prev ({previousWorkoutSession.sourceDate.slice(5)})
-                    </span>
+                    Unit: {profile.weightUnit.toUpperCase()}
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => addExercise()}
-                  className="inline-flex items-center gap-1 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400 transition"
-                >
-                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Add Exercise</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={skipWorkoutToday}
+                    className={`rounded-lg border px-2.5 py-2 text-xs font-medium ${
+                      currentDay.workout.skipped
+                        ? "border-sky-500/50 bg-sky-500/15 text-sky-400"
+                        : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {currentDay.workout.skipped ? "Rest ✓" : "Rest"}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {workoutStatusBanner && (
               <div
@@ -3340,553 +3561,587 @@ export default function FitnessDashboard({
                   type="button"
                   onClick={() => setWorkoutStatusBanner("")}
                   aria-label="Dismiss workout notice"
-                  className="text-sky-400 hover:text-sky-200"
+                  className="text-sky-400"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
               </div>
             )}
 
-            {/* Saved Workout Routines (Tag & Auto-Fill Previous Weights/Reps) */}
-            <div className="rounded-xl border border-sky-500/25 bg-[var(--bg-elevated)] p-3 space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Layers className="h-4 w-4 text-sky-400" aria-hidden="true" />
-                  <span className="text-xs font-bold text-sky-400">
-                    Saved Workout Routines (Tag &amp; Auto-Fill Previous Weights)
-                  </span>
-                </div>
-                {currentDay.workout.exercises.length > 0 && (
+            {!desktopFullView && (
+              <div
+                role="tablist"
+                aria-label="Workouts Sub-Pages"
+                className="grid grid-cols-3 gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-1"
+              >
+                {(
+                  [
+                    { id: "routines", label: "1. Routines" },
+                    {
+                      id: "sets",
+                      label: `2. Active Sets (${currentDay.workout.exercises.length})`,
+                    },
+                    { id: "finish", label: "3. Finish & Load" },
+                  ] as const
+                ).map((p) => (
                   <button
+                    key={p.id}
                     type="button"
-                    onClick={() => setShowSaveRoutineForm((v) => !v)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-sky-500/35 bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-semibold text-sky-400 hover:bg-sky-500/10 transition"
-                  >
-                    <Save className="h-3 w-3" aria-hidden="true" />
-                    <span>Save Current as Routine</span>
-                  </button>
-                )}
-              </div>
-
-              <div className="flex flex-wrap gap-1.5">
-                {effectiveRoutines.map((routine) => {
-                  const isTagged = currentDay.workout.routineId === routine.id;
-                  return (
-                    <button
-                      key={routine.id}
-                      type="button"
-                      onClick={() => applyWorkoutRoutine(routine)}
-                      className={`rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
-                        isTagged
-                          ? "border-sky-400 bg-sky-500/20 text-sky-300 font-bold"
-                          : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:border-sky-500/45"
-                      }`}
-                    >
-                      <div className="font-semibold">{routine.name}</div>
-                      <div className="text-[10px] text-[var(--text-muted)]">
-                        {routine.exercises.length} exercises · {routine.environment}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {showSaveRoutineForm && (
-                <form
-                  onSubmit={saveCurrentWorkoutAsRoutine}
-                  className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs"
-                >
-                  <input
-                    type="text"
-                    value={newRoutineName}
-                    onChange={(e) => setNewRoutineName(e.target.value)}
-                    placeholder="Routine name (e.g. Push Day Home)..."
-                    className="flex-1 min-w-[180px] rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-xs"
-                  />
-                  <select
-                    aria-label="Routine Environment"
-                    value={newRoutineEnv}
-                    onChange={(e) =>
-                      setNewRoutineEnv(e.target.value as "home" | "external")
-                    }
-                    className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-xs"
-                  >
-                    <option value="home">Home Gym</option>
-                    <option value="external">External Gym</option>
-                  </select>
-                  <button
-                    type="submit"
-                    className="rounded-md bg-sky-500 px-3 py-1 font-semibold text-slate-950 hover:bg-sky-400"
-                  >
-                    Save Routine
-                  </button>
-                </form>
-              )}
-            </div>
-
-            {/* Session Summary Inputs (Workout Split, Gym Time, Cardio) */}
-            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="workout-title"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Workout Split / Focus
-                </label>
-                <input
-                  id="workout-title"
-                  type="text"
-                  value={currentDay.workout.sessionTitle}
-                  onChange={(e) =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      workout: { ...d.workout, sessionTitle: e.target.value },
-                    }))
-                  }
-                  className="mt-1 w-full bg-transparent text-sm font-semibold focus:outline-none"
-                />
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="gym-minutes"
-                  className="flex items-center gap-1 text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  <Clock className="h-3 w-3 text-sky-400" aria-hidden="true" />
-                  Time Spent in Gym (min)
-                </label>
-                <div className="mt-1 flex items-baseline gap-1">
-                  <input
-                    id="gym-minutes"
-                    type="text"
-                    inputMode="numeric"
-                    value={currentDay.workout.gymDurationMinutes}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        workout: {
-                          ...d.workout,
-                          gymDurationMinutes: Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                        },
-                      }))
-                    }
-                    className="w-20 bg-transparent text-lg font-bold text-sky-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">mins</span>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="cardio-mins"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Cardio / Conditioning (min)
-                </label>
-                <div className="mt-1 flex items-center gap-1.5">
-                  <input
-                    id="cardio-mins"
-                    type="text"
-                    inputMode="numeric"
-                    value={currentDay.workout.cardioMinutes}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        workout: {
-                          ...d.workout,
-                          cardioMinutes: Number(e.target.value.replace(/[^0-9.]/g, "")) || 0,
-                        },
-                      }))
-                    }
-                    className="w-12 bg-transparent text-base font-bold text-emerald-400 focus:outline-none"
-                  />
-                  <input
-                    type="text"
-                    aria-label="Cardio Type"
-                    placeholder="Type (e.g. Zone 2 Walk)"
-                    value={currentDay.workout.cardioType}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        workout: { ...d.workout, cardioType: e.target.value },
-                      }))
-                    }
-                    className="w-full bg-transparent text-xs text-[var(--text-muted)] focus:outline-none"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Type-Aware Quick-Add Exercise Presets (Strength · Bodyweight · Cardio) */}
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                  Popular Exercise Presets by Type
-                </span>
-                <div className="flex flex-wrap gap-1">
-                  {(
-                    [
-                      { id: "all", label: "All" },
-                      { id: "strength", label: "Gym / Strength (Wt + Reps)" },
-                      { id: "bodyweight", label: "Bodyweight (Reps Only · 0 Wt)" },
-                      { id: "cardio", label: "Cardio (Duration Only)" },
-                    ] as const
-                  ).map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() => setPresetTypeFilter(f.id)}
-                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
-                        presetTypeFilter === f.id
-                          ? "bg-sky-500 text-slate-950 font-semibold"
-                          : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                      }`}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                {CATEGORIZED_EXERCISE_PRESETS.filter(
-                  (p) => presetTypeFilter === "all" || p.exerciseType === presetTypeFilter
-                ).map((preset) => (
-                  <button
-                    key={preset.name}
-                    type="button"
-                    onClick={() => {
-                      if (preset.exerciseType === "cardio") {
-                        logQuickCardio(
-                          preset.name,
-                          preset.defaultDurationMinutes || quickCardioMins || 20
-                        );
-                      } else {
-                        addExercise(preset.name, preset.muscleGroup, {
-                          exerciseType: preset.exerciseType,
-                          defaultWeight: preset.defaultWeight,
-                          defaultReps: preset.defaultReps,
-                        });
-                      }
-                    }}
-                    className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
-                      preset.exerciseType === "bodyweight"
-                        ? "border-teal-500/35 bg-teal-500/10 text-teal-300 hover:border-teal-400"
-                        : preset.exerciseType === "cardio"
-                        ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300 hover:border-emerald-400"
-                        : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-sky-500/50 hover:text-sky-400"
+                    role="tab"
+                    aria-selected={workoutSubPage === p.id}
+                    onClick={() => setWorkoutSubPage(p.id)}
+                    className={`rounded-lg py-1.5 text-[11px] sm:text-xs font-bold transition ${
+                      workoutSubPage === p.id
+                        ? "bg-sky-500 text-slate-950 shadow-xs"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                     }`}
                   >
-                    + {preset.name}
-                    {preset.exerciseType === "bodyweight"
-                      ? " (BW)"
-                      : preset.exerciseType === "cardio"
-                      ? ` (${preset.defaultDurationMinutes}m)`
-                      : ""}
+                    {p.label}
                   </button>
                 ))}
               </div>
+            )}
 
-              {/* Quick Cardio Duration Bar */}
-              {(presetTypeFilter === "all" || presetTypeFilter === "cardio") && (
-                <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2 text-xs">
-                  <span className="text-[11px] font-semibold text-emerald-400">
-                    Quick Cardio:
-                  </span>
-                  <input
-                    type="text"
-                    aria-label="Quick Cardio Activity"
-                    value={quickCardioType}
-                    onChange={(e) => setQuickCardioType(e.target.value)}
-                    className="w-36 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
-                  />
-                  {[10, 15, 20, 30, 45].map((mins) => (
-                    <button
-                      key={mins}
-                      type="button"
-                      onClick={() => {
-                        setQuickCardioMins(mins);
-                        logQuickCardio(quickCardioType, mins);
-                      }}
-                      className="rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
-                    >
-                      {mins}m
-                    </button>
-                  ))}
-                  <div className="flex items-center gap-1">
-                    <DecimalInput
-                      allowDecimal={false}
-                      min={1}
-                      max={300}
-                      aria-label="Quick Cardio Custom Minutes"
-                      value={quickCardioMins}
-                      onValueChange={(v) => setQuickCardioMins(Math.max(1, v))}
-                      className="w-12 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-1 text-center text-xs font-bold"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => logQuickCardio(quickCardioType, quickCardioMins)}
-                      className="rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-emerald-400"
-                    >
-                      Log Cardio
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Exercise Cards List */}
-            <div className="space-y-3">
-              {currentDay.workout.exercises.length === 0 && (
-                <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-center space-y-2">
-                  <div className="text-xs sm:text-sm font-semibold">
-                    No exercises logged yet for {selectedDate}
-                  </div>
-                  <p className="text-[11px] text-[var(--text-muted)]">
-                    Tap a Quick Add movement above, add a custom exercise, or{" "}
-                    {previousWorkoutSession
-                      ? `load your previous session (${previousWorkoutSession.sessionTitle} from ${previousWorkoutSession.sourceDate}) to beat your previous weights and reps.`
-                      : "enter your sets, weights, and reps to start progressive overload tracking."}
-                  </p>
-                  {previousWorkoutSession && (
-                    <button
-                      type="button"
-                      onClick={loadPreviousWorkoutIntoToday}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400 transition"
-                    >
-                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>
-                        Carry Over {previousWorkoutSession.sessionTitle} (
-                        {previousWorkoutSession.exercises.length} exercises)
-                      </span>
-                    </button>
-                  )}
-                </div>
-              )}
-              {currentDay.workout.exercises.map((exercise, exIdx) => {
-                const prevSetsForEx = findPreviousExerciseSets(
-                  profile,
-                  selectedDate,
-                  exercise.name
-                );
-                const isBodyweightEx =
-                  exercise.exerciseType === "bodyweight" ||
-                  (!exercise.exerciseType &&
-                    (exercise.name.toLowerCase().includes("push-up") ||
-                      exercise.name.toLowerCase().includes("pull-up") ||
-                      exercise.name.toLowerCase().includes("chin-up") ||
-                      exercise.name.toLowerCase().includes("bodyweight")));
-                return (
-                <div
-                  key={exercise.id}
-                  className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 sm:p-4 space-y-2.5"
-                >
+            {/* SUB-PAGE 2A: ROUTINES & QUICK EXERCISE/CARDIO PICKER */}
+            {(desktopFullView || workoutSubPage === "routines") && (
+              <div className="space-y-3">
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 flex-1 min-w-[200px]">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15 text-xs font-bold text-sky-400">
-                        {exIdx + 1}
-                      </span>
-                      <input
-                        type="text"
-                        aria-label={`Exercise ${exIdx + 1} Name`}
-                        value={exercise.name}
-                        onChange={(e) =>
-                          updateExercise(exercise.id, { name: e.target.value })
-                        }
-                        placeholder="Type exercise name..."
-                        className="w-full bg-transparent text-sm sm:text-base font-bold focus:outline-none border-b border-transparent focus:border-sky-500"
-                      />
-                      {exercise.targetRepRange && (
-                        <span className="shrink-0 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-400">
-                          {exercise.targetRepRange} reps
-                        </span>
-                      )}
-                      <input
-                        type="text"
-                        aria-label={`Exercise ${exIdx + 1} Muscle Group`}
-                        value={exercise.muscleGroup}
-                        onChange={(e) =>
-                          updateExercise(exercise.id, {
-                            muscleGroup: e.target.value,
-                          })
-                        }
-                        placeholder="Muscle"
-                        className="hidden sm:block w-24 shrink-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-center text-[11px] text-[var(--text-muted)]"
-                      />
-                    </div>
-
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-sky-400">
+                      <Layers className="h-4 w-4" aria-hidden="true" />
+                      <span>1-Tap Routines (Carries Over Last Weights)</span>
+                    </span>
                     <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateExercise(exercise.id, {
-                            exerciseType: isBodyweightEx ? "strength" : "bodyweight",
-                            sets: isBodyweightEx
-                              ? exercise.sets
-                              : exercise.sets.map((s) => ({ ...s, weight: 0 })),
-                          })
-                        }
-                        title="Toggle between weighted gym exercise and zero-weight bodyweight exercise"
-                        className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
-                          isBodyweightEx
-                            ? "border-teal-500/40 bg-teal-500/15 text-teal-300"
-                            : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-teal-300"
-                        }`}
-                      >
-                        {isBodyweightEx ? "Bodyweight (0 Wt)" : "Weighted"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => addSetToExercise(exercise.id)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20"
-                      >
-                        <Plus className="h-3 w-3" aria-hidden="true" />
-                        <span>Set</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeExercise(exercise.id)}
-                        aria-label={`Delete ${exercise.name}`}
-                        className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-rose-500/15 hover:text-rose-400"
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      </button>
+                      {previousWorkoutSession && (
+                        <button
+                          type="button"
+                          onClick={loadPreviousWorkoutIntoToday}
+                          className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-semibold text-sky-400"
+                        >
+                          <Copy className="h-3 w-3" aria-hidden="true" />
+                          <span>Load Prev</span>
+                        </button>
+                      )}
+                      {currentDay.workout.exercises.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowSaveRoutineForm((v) => !v)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[11px] font-semibold"
+                        >
+                          <Save className="h-3 w-3" aria-hidden="true" />
+                          <span>Save Routine</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  {prevSetsForEx && (
-                    <div className="text-[11px] text-sky-400/90">
-                      Previous ({prevSetsForEx.sourceDate}):{" "}
-                      {prevSetsForEx.sets
-                        .map((ps) =>
-                          isBodyweightEx
-                            ? `${ps.reps} reps (BW)`
-                            : `${ps.weight}${profile.weightUnit}×${ps.reps}`
-                        )
-                        .join(" · ")}
-                    </div>
-                  )}
-
-                  {/* Crisp Mobile-First Set Grid (Set | Weight | Reps | Done) */}
-                  <div
-                    role="region"
-                    aria-label={`${exercise.name || `Exercise ${exIdx + 1}`} sets`}
-                    className="max-w-md space-y-1.5"
-                  >
-                    <div className="grid grid-cols-[2.25rem_5.5rem_4.5rem_1fr] items-center gap-2 border-b border-[var(--border-subtle)] pb-1 text-[11px] font-medium text-[var(--text-muted)]">
-                      <span>Set</span>
-                      <span>{isBodyweightEx ? "Weight" : `Weight (${profile.weightUnit})`}</span>
-                      <span>Reps</span>
-                      <span className="text-left">Done</span>
-                    </div>
-                    <div className="divide-y divide-[var(--border-subtle)]/50">
-                      {exercise.sets.map((s, sIdx) => (
-                        <div
-                          key={s.id}
-                          className={`grid grid-cols-[2.25rem_5.5rem_4.5rem_1fr] items-center gap-2 py-1.5 text-xs ${
-                            s.completed ? "" : "opacity-55"
+                  <div className="grid grid-cols-2 gap-2">
+                    {effectiveRoutines.map((routine) => {
+                      const isTagged = currentDay.workout.routineId === routine.id;
+                      return (
+                        <button
+                          key={routine.id}
+                          type="button"
+                          onClick={() => applyWorkoutRoutine(routine)}
+                          className={`rounded-xl border p-2.5 text-left transition ${
+                            isTagged
+                              ? "border-sky-400 bg-sky-500/15 text-sky-300"
+                              : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-sky-500/45"
                           }`}
                         >
-                          <span className="font-semibold text-[var(--text-muted)] tabular-nums">
-                            #{sIdx + 1}
-                          </span>
-                          {isBodyweightEx ? (
-                            <span className="w-full rounded-md border border-teal-500/30 bg-teal-500/10 px-2 py-1.5 text-center text-[11px] font-bold text-teal-300">
-                              0 (BW)
-                            </span>
-                          ) : (
-                            <DecimalInput
-                              allowDecimal
-                              min={0}
-                              aria-label={`Set ${sIdx + 1} Weight`}
-                              value={s.weight}
-                              onValueChange={(val) =>
-                                updateExerciseSet(exercise.id, s.id, {
-                                  weight: val,
-                                })
-                              }
-                              onBlur={() => void flushSaveNow()}
-                              className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
-                            />
-                          )}
-                          <DecimalInput
-                            allowDecimal={false}
-                            min={0}
-                            aria-label={`Set ${sIdx + 1} Reps`}
-                            value={s.reps}
-                            onValueChange={(val) =>
-                              updateExerciseSet(exercise.id, s.id, {
-                                reps: Math.round(val),
-                              })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-center font-semibold tabular-nums focus:border-sky-400 focus:outline-none"
-                          />
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="checkbox"
-                              aria-label={`Mark set ${sIdx + 1} completed`}
-                              checked={s.completed}
-                              onChange={(e) =>
-                                updateExerciseSet(exercise.id, s.id, {
-                                  completed: e.target.checked,
-                                })
-                              }
-                              className="h-5 w-5 rounded accent-emerald-500 cursor-pointer"
-                            />
-                            {exercise.sets.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  removeExerciseSet(exercise.id, s.id)
-                                }
-                                aria-label={`Remove set ${sIdx + 1}`}
-                                className="rounded p-1 text-sm text-[var(--text-muted)] hover:bg-rose-500/15 hover:text-rose-400"
-                              >
-                                ×
-                              </button>
-                            )}
+                          <div className="text-xs font-bold leading-snug">
+                            {routine.name}
                           </div>
-                        </div>
+                          <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                            {routine.exercises.length} exercises · {routine.environment}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {showSaveRoutineForm && (
+                    <form
+                      onSubmit={saveCurrentWorkoutAsRoutine}
+                      className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs"
+                    >
+                      <input
+                        type="text"
+                        value={newRoutineName}
+                        onChange={(e) => setNewRoutineName(e.target.value)}
+                        placeholder="Routine name (e.g. Push Home)..."
+                        className="flex-1 min-w-[140px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs"
+                      />
+                      <select
+                        aria-label="Routine Environment"
+                        value={newRoutineEnv}
+                        onChange={(e) =>
+                          setNewRoutineEnv(e.target.value as "home" | "external")
+                        }
+                        className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1.5 text-xs"
+                      >
+                        <option value="home">Home Gym</option>
+                        <option value="external">External Gym</option>
+                      </select>
+                      <button
+                        type="submit"
+                        className="rounded-lg bg-sky-500 px-3 py-1.5 font-bold text-slate-950"
+                      >
+                        Save
+                      </button>
+                    </form>
+                  )}
+                </div>
+
+                {/* Type-Filtered Quick Add Exercises & Cardio */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold">Quick Add Movement</span>
+                    <div className="flex flex-wrap gap-1">
+                      {(
+                        [
+                          { id: "all", label: "All" },
+                          { id: "strength", label: "Strength" },
+                          { id: "bodyweight", label: "0-Wt BW" },
+                          { id: "cardio", label: "Cardio" },
+                        ] as const
+                      ).map((f) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setPresetTypeFilter(f.id)}
+                          className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                            presetTypeFilter === f.id
+                              ? "bg-sky-500 text-slate-950"
+                              : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                          }`}
+                        >
+                          {f.label}
+                        </button>
                       ))}
                     </div>
                   </div>
 
-                  {/* Per-Exercise Inline Note */}
-                  <div className="pt-1">
+                  <div className="flex flex-wrap gap-1.5">
+                    {CATEGORIZED_EXERCISE_PRESETS.filter(
+                      (p) =>
+                        presetTypeFilter === "all" ||
+                        p.exerciseType === presetTypeFilter
+                    )
+                      .slice(0, presetTypeFilter === "all" ? 10 : 14)
+                      .map((preset) => (
+                        <button
+                          key={preset.name}
+                          type="button"
+                          onClick={() => {
+                            if (preset.exerciseType === "cardio") {
+                              logQuickCardio(
+                                preset.name,
+                                preset.defaultDurationMinutes || quickCardioMins || 20
+                              );
+                            } else {
+                              addExercise(preset.name, preset.muscleGroup, {
+                                exerciseType: preset.exerciseType,
+                                defaultWeight: preset.defaultWeight,
+                                defaultReps: preset.defaultReps,
+                              });
+                            }
+                          }}
+                          className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                            preset.exerciseType === "bodyweight"
+                              ? "border-teal-500/35 bg-teal-500/10 text-teal-300"
+                              : preset.exerciseType === "cardio"
+                              ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300"
+                              : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-sky-500/50"
+                          }`}
+                        >
+                          + {preset.name}
+                          {preset.exerciseType === "bodyweight"
+                            ? " (BW)"
+                            : preset.exerciseType === "cardio"
+                            ? ` (${preset.defaultDurationMinutes}m)`
+                            : ""}
+                        </button>
+                      ))}
+                  </div>
+
+                  {/* Quick Cardio Bar */}
+                  <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--border-subtle)] pt-2.5 text-xs">
+                    <span className="text-[11px] font-bold text-emerald-400">
+                      Cardio:
+                    </span>
                     <input
                       type="text"
-                      aria-label={`Note for ${exercise.name}`}
-                      placeholder="Add exercise note (e.g., grip width, machine setting, tempo, joint feel)..."
-                      value={exercise.note}
-                      onChange={(e) =>
-                        updateExercise(exercise.id, { note: e.target.value })
+                      aria-label="Quick Cardio Activity"
+                      value={quickCardioType}
+                      onChange={(e) => setQuickCardioType(e.target.value)}
+                      className="w-28 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-xs"
+                    />
+                    {[10, 15, 20, 30].map((mins) => (
+                      <button
+                        key={mins}
+                        type="button"
+                        onClick={() => {
+                          setQuickCardioMins(mins);
+                          logQuickCardio(quickCardioType, mins);
+                        }}
+                        className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[11px] font-bold text-emerald-400"
+                      >
+                        {mins}m
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => addExercise()}
+                      className="ml-auto inline-flex items-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1 text-[11px] font-bold text-slate-950"
+                    >
+                      <Plus className="h-3 w-3" aria-hidden="true" />
+                      <span>Custom Lift</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-PAGE 2B: ACTIVE EXERCISES — COMPACT ACCORDION LIST */}
+            {(desktopFullView || workoutSubPage === "sets") && (
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2 px-0.5">
+                  <span className="text-xs font-bold">
+                    {currentDay.workout.sessionTitle || "Today's Exercises"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => addExercise()}
+                    className="inline-flex items-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1 text-[11px] font-bold text-slate-950"
+                  >
+                    <Plus className="h-3 w-3" aria-hidden="true" />
+                    <span>Add Exercise</span>
+                  </button>
+                </div>
+
+                {currentDay.workout.exercises.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-surface)] p-5 text-center space-y-2.5">
+                    <div className="text-xs font-bold">No exercises added yet</div>
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      Tap a 1-tap routine on Page 1 or add a custom exercise to start logging sets.
+                    </p>
+                    <div className="flex justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setWorkoutSubPage("routines")}
+                        className="rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-bold text-sky-400"
+                      >
+                        Choose Routine
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => addExercise()}
+                        className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-slate-950"
+                      >
+                        + Add Exercise
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {currentDay.workout.exercises.map((exercise, exIdx) => {
+                      const isOpen =
+                        desktopFullView || expandedExerciseId === exercise.id;
+                      const doneSets = exercise.sets.filter((s) => s.completed).length;
+                      const topSet = exercise.sets[0];
+                      const prevSetsForEx = findPreviousExerciseSets(
+                        profile,
+                        selectedDate,
+                        exercise.name
+                      );
+                      const isBodyweightEx =
+                        exercise.exerciseType === "bodyweight" ||
+                        (!exercise.exerciseType &&
+                          (exercise.name.toLowerCase().includes("push-up") ||
+                            exercise.name.toLowerCase().includes("pull-up") ||
+                            exercise.name.toLowerCase().includes("chin-up") ||
+                            exercise.name.toLowerCase().includes("bodyweight")));
+
+                      if (!isOpen) {
+                        return (
+                          <button
+                            key={exercise.id}
+                            type="button"
+                            onClick={() => setExpandedExerciseId(exercise.id)}
+                            className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:border-sky-500/45 transition"
+                          >
+                            <div className="min-w-0 truncate text-xs">
+                              <span className="font-bold">
+                                {exIdx + 1}. {exercise.name}
+                              </span>
+                              <span className="text-[var(--text-muted)] ml-1.5">
+                                · {doneSets}/{exercise.sets.length} sets ·{" "}
+                                {isBodyweightEx
+                                  ? `${topSet?.reps ?? 0} reps (BW)`
+                                  : `${topSet?.weight ?? 0}${profile.weightUnit} × ${topSet?.reps ?? 0}`}
+                              </span>
+                            </div>
+                            <span
+                              className={`shrink-0 text-xs font-bold ${
+                                doneSets === exercise.sets.length && exercise.sets.length > 0
+                                  ? "text-emerald-400"
+                                  : "text-[var(--text-muted)]"
+                              }`}
+                            >
+                              {doneSets === exercise.sets.length && exercise.sets.length > 0
+                                ? "✓"
+                                : "▸"}
+                            </span>
+                          </button>
+                        );
                       }
-                      onBlur={() => void flushSaveNow()}
-                      className="w-full rounded-lg border border-[var(--border-subtle)]/70 bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
+
+                      return (
+                        <div
+                          key={exercise.id}
+                          className="rounded-2xl border border-sky-500/45 bg-[var(--bg-surface)] p-3.5 space-y-2.5"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-1 min-w-[170px]">
+                              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15 text-xs font-bold text-sky-400">
+                                {exIdx + 1}
+                              </span>
+                              <input
+                                type="text"
+                                aria-label={`Exercise ${exIdx + 1} Name`}
+                                value={exercise.name}
+                                onChange={(e) =>
+                                  updateExercise(exercise.id, {
+                                    name: e.target.value,
+                                  })
+                                }
+                                placeholder="Exercise name..."
+                                className="w-full bg-transparent text-sm font-bold focus:outline-none border-b border-transparent focus:border-sky-500"
+                              />
+                            </div>
+
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateExercise(exercise.id, {
+                                    exerciseType: isBodyweightEx
+                                      ? "strength"
+                                      : "bodyweight",
+                                    sets: isBodyweightEx
+                                      ? exercise.sets
+                                      : exercise.sets.map((s) => ({
+                                          ...s,
+                                          weight: 0,
+                                        })),
+                                  })
+                                }
+                                className={`rounded-lg border px-2 py-1 text-[10px] font-bold ${
+                                  isBodyweightEx
+                                    ? "border-teal-500/40 bg-teal-500/15 text-teal-300"
+                                    : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                                }`}
+                              >
+                                {isBodyweightEx ? "0 Wt (BW)" : "Weighted"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => addSetToExercise(exercise.id)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/35 bg-sky-500/10 px-2 py-1 text-[11px] font-bold text-sky-400"
+                              >
+                                <Plus className="h-3 w-3" aria-hidden="true" />
+                                <span>Set</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeExercise(exercise.id)}
+                                aria-label={`Delete ${exercise.name}`}
+                                className="rounded-lg p-1 text-[var(--text-muted)] hover:text-rose-400"
+                              >
+                                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {prevSetsForEx && (
+                            <div className="text-[11px] text-sky-400">
+                              Last ({prevSetsForEx.sourceDate}):{" "}
+                              {prevSetsForEx.sets
+                                .map((ps) =>
+                                  isBodyweightEx
+                                    ? `${ps.reps} reps (BW)`
+                                    : `${ps.weight}${profile.weightUnit}×${ps.reps}`
+                                )
+                                .join(" · ")}
+                            </div>
+                          )}
+
+                          {/* WHOOP 5.0 Set Table: Type (W/1/2/F) | Weight | Reps | Done */}
+                          <div className="space-y-1.5">
+                            <div className="grid grid-cols-[2.4rem_1fr_4.2rem_3.6rem] items-center gap-1.5 border-b border-[var(--border-subtle)] pb-1 text-[10px] font-semibold text-[var(--text-muted)]">
+                              <span>Type</span>
+                              <span>
+                                {isBodyweightEx
+                                  ? "Weight"
+                                  : `Weight (${profile.weightUnit})`}
+                              </span>
+                              <span>Reps</span>
+                              <span className="text-center">Done</span>
+                            </div>
+
+                            {exercise.sets.map((s, sIdx) => {
+                              const st = s.setType || (sIdx === 0 ? "1" : "2");
+                              return (
+                                <div
+                                  key={s.id}
+                                  className={`grid grid-cols-[2.4rem_1fr_4.2rem_3.6rem] items-center gap-1.5 py-1 text-xs ${
+                                    s.completed ? "" : "opacity-60"
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      cycleExerciseSetType(exercise.id, s.id, st)
+                                    }
+                                    title="Tap to switch Warm-up (W) / Working (1,2) / Failure (F)"
+                                    className={`rounded-md border py-1 text-center text-[11px] font-extrabold ${
+                                      st === "W"
+                                        ? "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                                        : st === "F"
+                                        ? "border-rose-500/45 bg-rose-500/15 text-rose-400"
+                                        : "border-sky-500/40 bg-sky-500/15 text-sky-400"
+                                    }`}
+                                  >
+                                    {st}
+                                  </button>
+
+                                  {isBodyweightEx ? (
+                                    <span className="rounded-lg border border-teal-500/30 bg-teal-500/10 py-1.5 text-center text-[11px] font-bold text-teal-300">
+                                      0 (BW)
+                                    </span>
+                                  ) : (
+                                    <DecimalInput
+                                      allowDecimal
+                                      min={0}
+                                      aria-label={`Set ${sIdx + 1} Weight`}
+                                      value={s.weight}
+                                      onValueChange={(val) =>
+                                        updateExerciseSet(exercise.id, s.id, {
+                                          weight: val,
+                                        })
+                                      }
+                                      onBlur={() => void flushSaveNow()}
+                                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-center font-bold tabular-nums focus:border-sky-400 focus:outline-none"
+                                    />
+                                  )}
+
+                                  <DecimalInput
+                                    allowDecimal={false}
+                                    min={0}
+                                    aria-label={`Set ${sIdx + 1} Reps`}
+                                    value={s.reps}
+                                    onValueChange={(val) =>
+                                      updateExerciseSet(exercise.id, s.id, {
+                                        reps: Math.round(val),
+                                      })
+                                    }
+                                    onBlur={() => void flushSaveNow()}
+                                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-center font-bold tabular-nums focus:border-sky-400 focus:outline-none"
+                                  />
+
+                                  <div className="flex items-center justify-center gap-1">
+                                    <input
+                                      type="checkbox"
+                                      aria-label={`Mark set ${sIdx + 1} completed`}
+                                      checked={s.completed}
+                                      onChange={(e) =>
+                                        updateExerciseSet(exercise.id, s.id, {
+                                          completed: e.target.checked,
+                                        })
+                                      }
+                                      className="h-5 w-5 rounded accent-emerald-500 cursor-pointer"
+                                    />
+                                    {exercise.sets.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          removeExerciseSet(exercise.id, s.id)
+                                        }
+                                        aria-label={`Remove set ${sIdx + 1}`}
+                                        className="text-xs text-[var(--text-muted)] hover:text-rose-400 px-0.5"
+                                      >
+                                        ×
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          <input
+                            type="text"
+                            aria-label={`Note for ${exercise.name}`}
+                            placeholder="1-line exercise cue (tempo, grip, joint feel)..."
+                            value={exercise.note}
+                            onChange={(e) =>
+                              updateExercise(exercise.id, { note: e.target.value })
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SUB-PAGE 2C: FINISH, MUSCULAR VS CARDIO LOAD & FULL 1-10 EFFORT RATING */}
+            {(desktopFullView || workoutSubPage === "finish") && (
+              <div className="space-y-3">
+                {/* Muscular Load vs Cardio Load Split */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-sky-400">
+                      Muscular Load {muscularLoadPct}%
+                    </span>
+                    <span className="text-emerald-400">
+                      Cardio Load{" "}
+                      {muscularLoadPct > 0 ? 100 - muscularLoadPct : 0}%
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--bg-elevated)] flex">
+                    <div
+                      className="h-full bg-sky-400 transition-all"
+                      style={{ width: `${muscularLoadPct}%` }}
+                    />
+                    <div
+                      className="h-full bg-emerald-400 transition-all"
+                      style={{
+                        width: `${muscularLoadPct > 0 ? 100 - muscularLoadPct : 0}%`,
+                      }}
                     />
                   </div>
                 </div>
-                );
-              })}
-            </div>
 
-            {/* Post-Workout 1–10 Rating & Auto-Calculated Workout Summary */}
-            {(isWorkoutLogged || Boolean(currentDay.workout.endedAt)) && (
-              <div className="rounded-xl border border-sky-500/35 bg-sky-500/5 p-3.5 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Star className="h-4 w-4 text-amber-400" aria-hidden="true" />
-                    <div>
-                      <div className="text-xs font-bold">
-                        Rate Today&apos;s Workout Effort (1–10)
-                      </div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        Stored on this workout &amp; day; directly calibrates Workout Intensity &amp; Strain.
-                      </div>
-                    </div>
+                {/* Full 2x5 1-10 Post-Workout Effort Rating */}
+                <div className="rounded-2xl border border-sky-500/35 bg-[var(--bg-surface)] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold">
+                      <Star className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                      <span>Rate Today&apos;s Effort (1–10)</span>
+                    </span>
+                    <span className="text-xs font-extrabold text-amber-400">
+                      {currentDay.workout.workoutRating ??
+                        currentDay.dailyWorkoutRating ??
+                        analysis.effectiveWorkoutRating}{" "}
+                      / 10
+                    </span>
                   </div>
-                  <div className="flex flex-wrap gap-1">
+                  <div className="grid grid-cols-5 gap-1.5">
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((r) => {
                       const activeRating =
                         currentDay.workout.workoutRating ??
@@ -3898,10 +4153,10 @@ export default function FitnessDashboard({
                           aria-label={`Rate workout ${r} out of 10`}
                           aria-pressed={activeRating === r}
                           onClick={() => setWorkoutRating(r)}
-                          className={`min-w-[28px] rounded-md px-2 py-1 text-xs font-bold transition ${
+                          className={`rounded-lg py-2 text-xs font-bold border transition ${
                             activeRating === r
-                              ? "bg-amber-500 text-slate-950"
-                              : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-amber-400/50"
+                              ? "border-amber-400 bg-amber-500 text-slate-950"
+                              : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-amber-400/50"
                           }`}
                         >
                           {r}
@@ -3911,189 +4166,289 @@ export default function FitnessDashboard({
                   </div>
                 </div>
 
-                {/* Auto-Calculated Workout Summary Strip */}
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-center text-xs">
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
-                    <div className="text-[10px] text-[var(--text-muted)]">Total Duration</div>
-                    <div className="font-extrabold text-sky-400 tabular-nums">
-                      {currentDay.workout.gymDurationMinutes + currentDay.workout.cardioMinutes} min
+                {/* Duration & Summary Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                    <label
+                      htmlFor="gym-minutes"
+                      className="block text-[10px] text-[var(--text-muted)]"
+                    >
+                      Gym Minutes
+                    </label>
+                    <DecimalInput
+                      id="gym-minutes"
+                      allowDecimal={false}
+                      min={0}
+                      value={currentDay.workout.gymDurationMinutes}
+                      onValueChange={(v) =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          workout: { ...d.workout, gymDurationMinutes: Math.round(v) },
+                        }))
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="mt-0.5 w-full bg-transparent text-center text-lg font-extrabold tabular-nums text-sky-400 focus:outline-none"
+                    />
+                  </div>
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                    <label
+                      htmlFor="cardio-mins"
+                      className="block text-[10px] text-[var(--text-muted)]"
+                    >
+                      Cardio Minutes
+                    </label>
+                    <DecimalInput
+                      id="cardio-mins"
+                      allowDecimal={false}
+                      min={0}
+                      value={currentDay.workout.cardioMinutes}
+                      onValueChange={(v) =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          workout: { ...d.workout, cardioMinutes: Math.round(v) },
+                        }))
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="mt-0.5 w-full bg-transparent text-center text-lg font-extrabold tabular-nums text-emerald-400 focus:outline-none"
+                    />
+                  </div>
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      Intensity
+                    </div>
+                    <div className="mt-0.5 text-lg font-extrabold text-amber-400 tabular-nums">
+                      {analysis.workoutIntensityScore}%
                     </div>
                   </div>
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
-                    <div className="text-[10px] text-[var(--text-muted)]">Total Volume</div>
-                    <div className="font-extrabold tabular-nums">
-                      {analysis.totalVolume.toLocaleString()} {profile.weightUnit}
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      Workout Strain
                     </div>
-                  </div>
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
-                    <div className="text-[10px] text-[var(--text-muted)]">Workout Intensity</div>
-                    <div className="font-extrabold text-amber-400 tabular-nums">
-                      {analysis.workoutIntensityScore}% · {analysis.effectiveWorkoutRating}/10
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2">
-                    <div className="text-[10px] text-[var(--text-muted)]">Workout Strain</div>
-                    <div className="font-extrabold text-emerald-400 tabular-nums">
-                      {analysis.strainScore} / 21
+                    <div className="mt-0.5 text-lg font-extrabold text-emerald-400 tabular-nums">
+                      {analysis.strainScore}/21
                     </div>
                   </div>
                 </div>
+
+                {/* Workout Session Note */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1.5">
+                  <label
+                    htmlFor="workout-session-note"
+                    className="block text-xs font-bold text-[var(--text-muted)]"
+                  >
+                    Workout Session Notes
+                  </label>
+                  <textarea
+                    id="workout-session-note"
+                    placeholder="PRs hit, pump, joint notes, or coaching remarks..."
+                    value={currentDay.workout.note}
+                    onChange={(e) =>
+                      updateCurrentDay((d) => ({
+                        ...d,
+                        workout: { ...d.workout, note: e.target.value },
+                      }))
+                    }
+                    onBlur={() => void flushSaveNow()}
+                    className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
               </div>
             )}
-
-            {/* Overall Workout Session Note */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="workout-session-note"
-                  className="block text-xs font-medium text-[var(--text-muted)]"
-                >
-                  Workout Session Notes &amp; Gym Summary
-                </label>
-                <span className="text-[10px] text-[var(--text-muted)]">
-                  Auto-saved &amp; visible in History
-                </span>
-              </div>
-              <textarea
-                id="workout-session-note"
-                placeholder="Type any workout notes, PRs hit, energy levels, or coach remarks..."
-                value={currentDay.workout.note}
-                onChange={(e) =>
-                  updateCurrentDay((d) => ({
-                    ...d,
-                    workout: { ...d.workout, note: e.target.value },
-                  }))
-                }
-                onBlur={() => void flushSaveNow()}
-                className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-sky-500 focus:outline-none"
-              />
-            </div>
           </section>
         )}
 
         {/* =========================================================
-            MODULE 2: NUTRITION & HEALTH METRICS (Open Food Search, Portion Selector, 6-Macro Totals)
+            SCREEN 3: NUTRITION — 2 SUB-PAGES ONLY (1. Favs | 2. Food Search)
            ========================================================= */}
-        {(activeTab === "all" || activeTab === "nutrition") && (
-          <section
-            ref={nutritionSectionRef}
-            aria-labelledby="heading-nutrition"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
-                  <Apple className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2
-                    id="heading-nutrition"
-                    className="text-base font-bold sm:text-lg"
-                  >
-                    2. Nutrition
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    Choose Quick Totals (Calories + Protein) or Log 3–4 Foods Consumed — auto-sums Macros, Hydration &amp; Fiber
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
+        {showNutrition && (
+          <section aria-label="Nutrition Screen" className="space-y-3">
+            {!desktopFullView && (
+              <div
+                role="tablist"
+                aria-label="Nutrition Sub-Pages"
+                className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-1"
+              >
                 <button
                   type="button"
-                  onClick={() =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      checkIn: { ...d.checkIn, nutritionSkipped: true },
-                    }))
-                  }
-                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
-                    currentDay.checkIn?.nutritionSkipped && !isNutritionLogged
-                      ? "border-amber-500/45 bg-amber-500/15 text-amber-400"
-                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  role="tab"
+                  aria-selected={nutritionSubPage === "favs"}
+                  onClick={() => setNutritionSubPage("favs")}
+                  className={`rounded-lg py-1.5 text-xs font-bold transition ${
+                    nutritionSubPage === "favs"
+                      ? "bg-amber-500 text-slate-950 shadow-xs"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                   }`}
                 >
-                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>
-                    {currentDay.checkIn?.nutritionSkipped && !isNutritionLogged
-                      ? "Skipped for Now ✓"
-                      : "Skip Nutrition"}
-                  </span>
+                  1. Favs
                 </button>
-
-                <label className="inline-flex items-center gap-2 text-xs text-[var(--text-muted)] cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={currentDay.nutrition.useMealSum}
-                    onChange={(e) =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        nutrition: {
-                          ...d.nutrition,
-                          useMealSum: e.target.checked,
-                        },
-                      }))
-                    }
-                    className="h-4 w-4 rounded accent-emerald-500"
-                  />
-                  <span>Auto-sum totals from meal rows</span>
-                </label>
-              </div>
-            </div>
-
-            {/* Dual-Mode Quick Entry Toggle (Quick Totals vs. Log 3-4 Foods) */}
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-bold text-amber-400">
-                  Quick Nutrition Mode
-                </span>
-                <div
-                  role="group"
-                  aria-label="Nutrition Entry Mode"
-                  className="inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-0.5 text-xs"
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={nutritionSubPage === "search"}
+                  onClick={() => setNutritionSubPage("search")}
+                  className={`rounded-lg py-1.5 text-xs font-bold transition ${
+                    nutritionSubPage === "search"
+                      ? "bg-amber-500 text-slate-950 shadow-xs"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
                 >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        nutrition: { ...d.nutrition, useMealSum: false },
-                        checkIn: { ...d.checkIn, nutritionSkipped: false },
-                      }))
-                    }
-                    className={`rounded-md px-2.5 py-1 font-semibold transition ${
-                      !currentDay.nutrition.useMealSum
-                        ? "bg-amber-500 text-slate-950"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    Quick Totals (kcal + Protein)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        nutrition: { ...d.nutrition, useMealSum: true },
-                        checkIn: { ...d.checkIn, nutritionSkipped: false },
-                      }))
-                    }
-                    className={`rounded-md px-2.5 py-1 font-semibold transition ${
-                      currentDay.nutrition.useMealSum
-                        ? "bg-emerald-500 text-slate-950"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    Log 3–4 Foods Consumed
-                  </button>
-                </div>
+                  2. Food Search
+                </button>
               </div>
+            )}
 
-              {!currentDay.nutrition.useMealSum ? (
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="text-[11px] text-[var(--text-muted)]">
-                    Quick add directly to daily totals:
-                  </span>
+            {/* SUB-PAGE 3A: 1. FAVS (Primary Fuel, 4-Pill Macros, Quick Totals, Frequent Staples + Collapsible Logged Today) */}
+            {(desktopFullView || nutritionSubPage === "favs") && (
+              <div className="space-y-3">
+                {/* Primary Calories & Protein Cards */}
+                <div className="grid grid-cols-2 gap-2.5">
+                  {[
+                    {
+                      key: "calories",
+                      targetKey: "calorieTarget",
+                      label: "Calories",
+                      unit: "kcal",
+                      barColor: "bg-amber-400",
+                      textColor: "text-amber-400",
+                      border: "border-amber-500/40 bg-amber-500/5",
+                    },
+                    {
+                      key: "protein",
+                      targetKey: "proteinTarget",
+                      label: "Protein",
+                      unit: "g",
+                      barColor: "bg-emerald-400",
+                      textColor: "text-emerald-400",
+                      border: "border-emerald-500/40 bg-emerald-500/5",
+                    },
+                  ].map((item) => {
+                    const val =
+                      Number(
+                        currentDay.nutrition[
+                          item.key as keyof typeof currentDay.nutrition
+                        ]
+                      ) || 0;
+                    const target =
+                      Number(
+                        currentDay.nutrition[
+                          item.targetKey as keyof typeof currentDay.nutrition
+                        ]
+                      ) || 1;
+                    const pct = Math.min(100, Math.round((val / target) * 100));
+                    return (
+                      <div
+                        key={item.key}
+                        className={`rounded-2xl border p-3 space-y-1.5 ${item.border}`}
+                      >
+                        <div className="flex items-center justify-between text-xs font-bold">
+                          <span>{item.label}</span>
+                          <span className={item.textColor}>{pct}%</span>
+                        </div>
+                        <div className="flex items-baseline gap-1">
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={0}
+                            aria-label={`${item.label} Consumed (${item.unit})`}
+                            value={val}
+                            onValueChange={(nextVal) =>
+                              updateCurrentDay((d) => ({
+                                ...d,
+                                nutrition: {
+                                  ...d.nutrition,
+                                  useMealSum: false,
+                                  [item.key]: Math.round(nextVal),
+                                },
+                              }))
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className={`w-20 bg-transparent text-xl font-extrabold tabular-nums ${item.textColor} focus:outline-none`}
+                          />
+                          <span className="text-[11px] text-[var(--text-muted)]">
+                            /
+                          </span>
+                          <DecimalInput
+                            allowDecimal={false}
+                            min={1}
+                            aria-label={`${item.label} Target (${item.unit})`}
+                            value={target}
+                            onValueChange={(nextTarget) =>
+                              updateCurrentDay((d) => ({
+                                ...d,
+                                nutrition: {
+                                  ...d.nutrition,
+                                  [item.targetKey]: Math.round(nextTarget),
+                                },
+                              }))
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className="w-12 bg-transparent text-xs font-semibold tabular-nums text-[var(--text-muted)] focus:outline-none"
+                          />
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
+                          <div
+                            className={`h-full rounded-full ${item.barColor} transition-all`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Compact 4-Pill Secondary Macro Strip */}
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[
+                    { key: "carbs", label: "Carbs", unit: "g", dec: false, col: "text-sky-400" },
+                    { key: "fats", label: "Fats", unit: "g", dec: false, col: "text-purple-400" },
+                    { key: "waterLiters", label: "Water", unit: "L", dec: true, col: "text-cyan-400" },
+                    { key: "fiberGrams", label: "Fiber", unit: "g", dec: true, col: "text-teal-400" },
+                  ].map((m) => {
+                    const val =
+                      Number(
+                        currentDay.nutrition[
+                          m.key as keyof typeof currentDay.nutrition
+                        ]
+                      ) || 0;
+                    return (
+                      <div
+                        key={m.key}
+                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2 text-center"
+                      >
+                        <div className="text-[10px] text-[var(--text-muted)]">
+                          {m.label}
+                        </div>
+                        <div className="flex items-baseline justify-center gap-0.5">
+                          <DecimalInput
+                            allowDecimal={m.dec}
+                            min={0}
+                            aria-label={`${m.label} (${m.unit})`}
+                            value={val}
+                            onValueChange={(nextVal) =>
+                              updateCurrentDay((d) => ({
+                                ...d,
+                                nutrition: {
+                                  ...d.nutrition,
+                                  useMealSum: false,
+                                  [m.key]: m.dec
+                                    ? Number(nextVal.toFixed(2))
+                                    : Math.round(nextVal),
+                                },
+                              }))
+                            }
+                            onBlur={() => void flushSaveNow()}
+                            className={`w-10 bg-transparent text-center text-xs font-extrabold tabular-nums ${m.col} focus:outline-none`}
+                          />
+                          <span className="text-[10px] text-[var(--text-muted)]">
+                            {m.unit}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Quick Totals Row */}
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
                   {[250, 500].map((kcal) => (
                     <button
                       key={kcal}
@@ -4109,7 +4464,7 @@ export default function FitnessDashboard({
                           checkIn: { ...d.checkIn, nutritionSkipped: false },
                         }))
                       }
-                      className="rounded-md border border-amber-500/35 bg-[var(--bg-surface)] px-2 py-1 font-semibold text-amber-400 hover:bg-amber-500/15"
+                      className="rounded-xl border border-amber-500/35 bg-amber-500/10 py-2 font-bold text-amber-400 hover:bg-amber-500/20 transition"
                     >
                       +{kcal} kcal
                     </button>
@@ -4129,476 +4484,373 @@ export default function FitnessDashboard({
                           checkIn: { ...d.checkIn, nutritionSkipped: false },
                         }))
                       }
-                      className="rounded-md border border-emerald-500/35 bg-[var(--bg-surface)] px-2 py-1 font-semibold text-emerald-400 hover:bg-emerald-500/15"
+                      className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 py-2 font-bold text-emerald-400 hover:bg-emerald-500/20 transition"
                     >
-                      +{p}g Protein
+                      +{p}g P
                     </button>
                   ))}
                 </div>
-              ) : (
-                <form
-                  onSubmit={addQuickCustomFood}
-                  className="flex flex-wrap items-center gap-2 text-xs"
-                >
-                  <input
-                    type="text"
-                    aria-label="Quick food name"
-                    value={quickFoodName}
-                    onChange={(e) => setQuickFoodName(e.target.value)}
-                    placeholder="Food consumed (e.g. 3 Eggs + Toast, Chicken Bowl)..."
-                    className="flex-1 min-w-[200px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs focus:border-emerald-500 focus:outline-none"
-                  />
-                  <label className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1">
-                    <span className="text-[10px] text-amber-400">kcal</span>
+
+                {/* Your Favs (1-Tap Frequent Staples) */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-emerald-400">
+                      Your Favs (1-Tap Staples)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setNutritionSubPage("search")}
+                      className="text-[11px] font-semibold text-amber-400 hover:underline"
+                    >
+                      + Search Food &rarr;
+                    </button>
+                  </div>
+
+                  {frequentStaples.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs text-[var(--text-muted)]">
+                      No recurring Favs yet. Search any food and tap the Pin icon (or log foods across days) to populate your 1-tap Favs here.
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {frequentStaples.slice(0, 6).map((staple) => {
+                        const qty = stapleQuantities[staple.id] ?? 1;
+                        return (
+                          <div
+                            key={staple.id}
+                            className="flex items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold truncate">
+                                {staple.name}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)]">
+                                {Math.round(staple.calories * qty)} kcal ·{" "}
+                                <strong className="text-emerald-400">
+                                  {Math.round(staple.protein * qty)}g P
+                                </strong>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <DecimalInput
+                                allowDecimal
+                                min={0.25}
+                                max={20}
+                                aria-label={`Quantity for ${staple.name}`}
+                                value={qty}
+                                onValueChange={(nextQ) =>
+                                  setStapleQuantities((prev) => ({
+                                    ...prev,
+                                    [staple.id]: Math.max(0.25, nextQ || 1),
+                                  }))
+                                }
+                                className="w-10 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1 py-0.5 text-center text-[11px] font-bold"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  addUserFrequentStapleMeal(staple, qty)
+                                }
+                                className="rounded-lg bg-emerald-500 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:bg-emerald-400"
+                              >
+                                + Add
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Quick Custom Food Adder */}
+                  <form
+                    onSubmit={addQuickCustomFood}
+                    className="flex flex-wrap items-center gap-1.5 border-t border-[var(--border-subtle)] pt-2.5 text-xs"
+                  >
+                    <input
+                      type="text"
+                      aria-label="Quick food name"
+                      value={quickFoodName}
+                      onChange={(e) => setQuickFoodName(e.target.value)}
+                      placeholder="Quick add food (e.g. 3 Eggs + Toast)..."
+                      className="flex-1 min-w-[140px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs"
+                    />
                     <DecimalInput
                       allowDecimal={false}
                       min={0}
+                      showEmptyWhenZero
+                      placeholder="kcal"
                       aria-label="Quick food calories"
                       value={quickFoodCalories}
                       onValueChange={(v) => setQuickFoodCalories(Math.round(v))}
-                      className="w-14 bg-transparent text-right font-bold focus:outline-none"
+                      className="w-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-center text-xs font-bold"
                     />
-                  </label>
-                  <label className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1">
-                    <span className="text-[10px] text-emerald-400">P(g)</span>
                     <DecimalInput
                       allowDecimal={false}
                       min={0}
+                      showEmptyWhenZero
+                      placeholder="P(g)"
                       aria-label="Quick food protein"
                       value={quickFoodProtein}
                       onValueChange={(v) => setQuickFoodProtein(Math.round(v))}
-                      className="w-12 bg-transparent text-right font-bold focus:outline-none"
+                      className="w-12 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-center text-xs font-bold"
                     />
-                  </label>
-                  <button
-                    type="submit"
-                    className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 font-semibold text-slate-950 hover:bg-emerald-400 transition"
-                  >
-                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Add Food ({currentDay.nutrition.meals.length})</span>
-                  </button>
-                </form>
-              )}
-            </div>
-
-            {/* 2-Tier Visual Hierarchy: Primary (Calories + Protein) -> Secondary (Carbs, Fats, Hydration, Fiber) */}
-            <div className="space-y-2.5">
-              {/* Tier 1: Calories (Most Prominent) & Protein (2nd Prominent) */}
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                {[
-                  {
-                    key: "calories",
-                    targetKey: "calorieTarget",
-                    label: "Total Calories",
-                    unit: "kcal",
-                    color: "bg-amber-400",
-                    textColor: "text-amber-400",
-                    cardBorder: "border-amber-500/40 bg-amber-500/5",
-                    numberClass: "text-2xl sm:text-3xl font-extrabold",
-                  },
-                  {
-                    key: "protein",
-                    targetKey: "proteinTarget",
-                    label: "Protein",
-                    unit: "g",
-                    color: "bg-emerald-400",
-                    textColor: "text-emerald-400",
-                    cardBorder: "border-emerald-500/35 bg-emerald-500/5",
-                    numberClass: "text-xl sm:text-2xl font-extrabold",
-                  },
-                ].map((item) => {
-                  const val =
-                    Number(
-                      currentDay.nutrition[
-                        item.key as keyof typeof currentDay.nutrition
-                      ]
-                    ) || 0;
-                  const target =
-                    Number(
-                      currentDay.nutrition[
-                        item.targetKey as keyof typeof currentDay.nutrition
-                      ]
-                    ) || 1;
-                  const pct = Math.min(100, Math.round((val / target) * 100));
-
-                  return (
-                    <div
-                      key={item.key}
-                      className={`rounded-xl border p-3.5 space-y-2 ${item.cardBorder}`}
+                    <button
+                      type="submit"
+                      className="rounded-lg bg-amber-500 px-2.5 py-1.5 text-xs font-bold text-slate-950"
                     >
-                      <div className="flex items-center justify-between text-xs font-semibold">
-                        <span className="text-[var(--text-primary)]">
-                          {item.label}
-                        </span>
-                        <span className={item.textColor}>{pct}% of goal</span>
-                      </div>
-
-                      <div className="flex items-baseline gap-1.5">
-                        <DecimalInput
-                          allowDecimal={false}
-                          min={0}
-                          aria-label={`${item.label} Consumed (${item.unit})`}
-                          value={val}
-                          onValueChange={(nextVal) =>
-                            updateCurrentDay((d) => ({
-                              ...d,
-                              nutrition: {
-                                ...d.nutrition,
-                                useMealSum: false,
-                                [item.key]: Math.round(nextVal),
-                              },
-                            }))
-                          }
-                          onBlur={() => void flushSaveNow()}
-                          className={`w-24 bg-transparent tabular-nums ${item.numberClass} ${item.textColor} focus:outline-none`}
-                        />
-                        <span className="text-xs text-[var(--text-muted)]">
-                          /
-                        </span>
-                        <DecimalInput
-                          allowDecimal={false}
-                          min={1}
-                          aria-label={`${item.label} Target (${item.unit})`}
-                          value={target}
-                          onValueChange={(nextTarget) =>
-                            updateCurrentDay((d) => ({
-                              ...d,
-                              nutrition: {
-                                ...d.nutrition,
-                                [item.targetKey]: Math.round(nextTarget),
-                              },
-                            }))
-                          }
-                          onBlur={() => void flushSaveNow()}
-                          className="w-16 bg-transparent text-sm font-semibold tabular-nums text-[var(--text-muted)] focus:outline-none"
-                        />
-                        <span className="text-xs text-[var(--text-muted)]">
-                          {item.unit}
-                        </span>
-                      </div>
-
-                      <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
-                        <div
-                          className={`h-full rounded-full ${item.color} transition-all`}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Tier 2: Compact Secondary Macros & Hydration / Fiber */}
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {[
-                  {
-                    key: "carbs",
-                    targetKey: "carbTarget",
-                    label: "Carbs",
-                    unit: "g",
-                    color: "bg-sky-400",
-                    textColor: "text-sky-400",
-                    allowDecimal: false,
-                  },
-                  {
-                    key: "fats",
-                    targetKey: "fatTarget",
-                    label: "Fats",
-                    unit: "g",
-                    color: "bg-purple-400",
-                    textColor: "text-purple-400",
-                    allowDecimal: false,
-                  },
-                  {
-                    key: "waterLiters",
-                    targetKey: "waterTargetLiters",
-                    label: "Hydration",
-                    unit: "L",
-                    color: "bg-cyan-400",
-                    textColor: "text-cyan-400",
-                    allowDecimal: true,
-                  },
-                  {
-                    key: "fiberGrams",
-                    targetKey: "fiberTargetGrams",
-                    label: "Fiber",
-                    unit: "g",
-                    color: "bg-teal-400",
-                    textColor: "text-teal-400",
-                    allowDecimal: true,
-                  },
-                ].map((item) => {
-                  const val =
-                    Number(
-                      currentDay.nutrition[
-                        item.key as keyof typeof currentDay.nutrition
-                      ]
-                    ) || 0;
-                  const target =
-                    Number(
-                      currentDay.nutrition[
-                        item.targetKey as keyof typeof currentDay.nutrition
-                      ]
-                    ) || 1;
-                  const pct = Math.min(100, Math.round((val / target) * 100));
-
-                  return (
-                    <div
-                      key={item.key}
-                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 space-y-1"
-                    >
-                      <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
-                        <span>{item.label}</span>
-                        <span>{pct}%</span>
-                      </div>
-
-                      <div className="flex items-baseline gap-1">
-                        <DecimalInput
-                          allowDecimal={item.allowDecimal}
-                          min={0}
-                          aria-label={`${item.label} Consumed (${item.unit})`}
-                          value={val}
-                          onValueChange={(nextVal) =>
-                            updateCurrentDay((d) => ({
-                              ...d,
-                              nutrition: {
-                                ...d.nutrition,
-                                useMealSum: false,
-                                [item.key]: item.allowDecimal
-                                  ? Number(nextVal.toFixed(2))
-                                  : Math.round(nextVal),
-                              },
-                            }))
-                          }
-                          onBlur={() => void flushSaveNow()}
-                          className={`w-12 bg-transparent text-sm font-bold tabular-nums ${item.textColor} focus:outline-none`}
-                        />
-                        <span className="text-[10px] text-[var(--text-muted)]">
-                          /
-                        </span>
-                        <DecimalInput
-                          allowDecimal={item.allowDecimal}
-                          min={0.5}
-                          aria-label={`${item.label} Target (${item.unit})`}
-                          value={target}
-                          onValueChange={(nextTarget) =>
-                            updateCurrentDay((d) => ({
-                              ...d,
-                              nutrition: {
-                                ...d.nutrition,
-                                [item.targetKey]: item.allowDecimal
-                                  ? Number(nextTarget.toFixed(2))
-                                  : Math.round(nextTarget),
-                              },
-                            }))
-                          }
-                          onBlur={() => void flushSaveNow()}
-                          className="w-10 bg-transparent text-[11px] tabular-nums text-[var(--text-muted)] focus:outline-none"
-                        />
-                        <span className="text-[10px] text-[var(--text-muted)]">
-                          {item.unit}
-                        </span>
-                      </div>
-
-                      <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--bg-surface)]">
-                        <div
-                          className={`h-full rounded-full ${item.color} transition-all`}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Your Frequently Eaten Daily Staples (Top 5-10 from Actual History + Pins) */}
-            <div className="rounded-xl border border-emerald-500/25 bg-[var(--bg-elevated)] p-3.5 space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs sm:text-sm font-bold text-emerald-400">
-                    Your Frequently Eaten Staples (Top 5–10 From Your Logs)
-                  </h3>
-                  <p className="text-[11px] text-[var(--text-muted)]">
-                    Built automatically from meals you repeatedly log across days (plus any items you pin with ★ below). Adjust quantity and tap Add.
-                  </p>
+                      + Log
+                    </button>
+                  </form>
                 </div>
-              </div>
 
-              {frequentStaples.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2.5 text-xs text-[var(--text-muted)]">
-                  No recurring personal staples yet. As you add meals below across your days—or click the pin (★) button next to any food in Search—your core 5–10 daily meals appear here for 1-tap logging.
-                </div>
-              ) : (
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {frequentStaples.map((staple) => {
-                    const qty = stapleQuantities[staple.id] ?? 1;
-                    return (
-                      <div
-                        key={staple.id}
-                        className="flex flex-col justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 text-xs"
+                {/* Compact Collapsible Logged Today Drawer (Replaces 3. Meals Sub-Page) */}
+                <details className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5">
+                  <summary className="flex items-center justify-between gap-2 cursor-pointer list-none text-xs font-bold">
+                    <span>
+                      Logged Today ({currentDay.nutrition.meals.length} items)
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--text-muted)]">
+                      <span>View / Remove</span>
+                      <ChevronDown className="h-4 w-4" aria-hidden="true" />
+                    </span>
+                  </summary>
+
+                  <div className="mt-3 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <label className="inline-flex items-center gap-1.5 text-[var(--text-muted)] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={currentDay.nutrition.useMealSum}
+                          onChange={(e) =>
+                            updateCurrentDay((d) => ({
+                              ...d,
+                              nutrition: {
+                                ...d.nutrition,
+                                useMealSum: e.target.checked,
+                              },
+                            }))
+                          }
+                          className="h-3.5 w-3.5 accent-emerald-500"
+                        />
+                        <span>Auto-sum totals from meal rows</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={addMeal}
+                        className="rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-400"
                       >
-                        <div>
-                          <div className="flex items-start justify-between gap-1.5">
-                            <span className="font-bold leading-snug">
-                              {staple.name}
-                            </span>
-                            <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">
-                              {staple.isPinned && staple.count <= 1
-                                ? "Pinned"
-                                : `Logged ${staple.count}×`}
-                            </span>
-                          </div>
-                          <div className="mt-1 text-[11px] text-[var(--text-muted)]">
-                            {staple.portionLabel} ·{" "}
-                            <strong className="text-amber-400">
-                              {Math.round(staple.calories * qty)} kcal
-                            </strong>{" "}
-                            ·{" "}
-                            <strong className="text-emerald-400">
-                              {Math.round(staple.protein * qty)}g P
-                            </strong>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--border-subtle)]/60">
-                          <label className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
-                            <span>Qty:</span>
-                            <DecimalInput
-                              allowDecimal
-                              min={0.25}
-                              max={20}
-                              aria-label={`Quantity for ${staple.name}`}
-                              value={qty}
-                              onValueChange={(nextQ) =>
-                                setStapleQuantities((prev) => ({
-                                  ...prev,
-                                  [staple.id]: Math.max(0.25, nextQ || 1),
-                                }))
-                              }
-                              className="w-12 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-center font-bold text-[var(--text-primary)]"
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              addUserFrequentStapleMeal(staple, qty)
-                            }
-                            className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-slate-950 hover:bg-emerald-400 transition"
-                          >
-                            <Plus className="h-3 w-3" aria-hidden="true" />
-                            <span>Add</span>
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Open Food Search & Portion Customizer (MyFitnessPal / ICMR-NIN / USDA Standard) */}
-            <div className="rounded-xl border border-amber-500/30 bg-[var(--bg-elevated)] p-3.5 sm:p-4 space-y-3.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Utensils className="h-4 w-4 text-amber-400" aria-hidden="true" />
-                  <h3
-                    id="heading-food-search"
-                    className="text-xs sm:text-sm font-bold"
-                  >
-                    Open Food Search &amp; Portion Calculator (ICMR-NIN India + USDA Global)
-                  </h3>
-                </div>
-                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400">
-                  {FOOD_DATABASE.length + aiFoodResults.length}+ Standardized Foods + Open Lookup
-                </span>
-              </div>
-
-              <search>
-                <form
-                  aria-labelledby="heading-food-search"
-                  onSubmit={handleOpenAiFoodSearch}
-                  className="flex flex-wrap items-end gap-2"
-                >
-                  <div className="flex-1 min-w-[220px] space-y-1">
-                    <label
-                      htmlFor="food-search-input"
-                      className="block text-[11px] font-medium text-[var(--text-muted)]"
-                    >
-                      Search any Global or Indian food (e.g. Grilled Chicken Breast, Salmon Fillet, Chapati, Dal Tadka, Paneer Tikka, Idli)
-                    </label>
-                    <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 focus-within:border-amber-400">
-                      <Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
-                      <input
-                        id="food-search-input"
-                        name="foodQuery"
-                        type="search"
-                        value={foodSearchQuery}
-                        onChange={(e) => setFoodSearchQuery(e.target.value)}
-                        placeholder="Type any food name to search or fetch macros..."
-                        autoCorrect="off"
-                        autoCapitalize="none"
-                        spellCheck={false}
-                        className="w-full bg-transparent text-xs sm:text-sm focus:outline-none"
-                      />
+                        + Custom Meal
+                      </button>
                     </div>
-                  </div>
 
+                    {currentDay.nutrition.meals.length === 0 ? (
+                      <div className="text-xs text-[var(--text-muted)]">
+                        No individual foods logged yet today.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {currentDay.nutrition.meals.map((meal) => (
+                          <div
+                            key={meal.id}
+                            className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 space-y-1.5 text-xs"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <input
+                                type="text"
+                                aria-label="Meal Description"
+                                value={meal.name}
+                                onChange={(e) =>
+                                  updateMeal(meal.id, { name: e.target.value })
+                                }
+                                onBlur={() => void flushSaveNow()}
+                                className="flex-1 min-w-0 bg-transparent font-bold focus:outline-none"
+                              />
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <DecimalInput
+                                  allowDecimal={false}
+                                  min={0}
+                                  aria-label={`${meal.name} kcal`}
+                                  value={meal.calories}
+                                  onValueChange={(val) =>
+                                    updateMeal(meal.id, { calories: Math.round(val) })
+                                  }
+                                  className="w-12 rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-right font-bold text-amber-400"
+                                />
+                                <DecimalInput
+                                  allowDecimal={false}
+                                  min={0}
+                                  aria-label={`${meal.name} protein`}
+                                  value={meal.protein}
+                                  onValueChange={(val) =>
+                                    updateMeal(meal.id, { protein: Math.round(val) })
+                                  }
+                                  className="w-10 rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-right font-bold text-emerald-400"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => removeMeal(meal.id)}
+                                  aria-label={`Remove ${meal.name}`}
+                                  className="p-1 text-[var(--text-muted)] hover:text-rose-400"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Custom Health Metrics */}
+                    <div className="border-t border-[var(--border-subtle)] pt-2.5 space-y-2">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-[var(--text-muted)]">
+                          Custom Biomarkers &amp; Metrics
+                        </span>
+                        <button
+                          type="button"
+                          onClick={addCustomMetric}
+                          className="text-emerald-400 font-semibold"
+                        >
+                          + Add Metric
+                        </button>
+                      </div>
+                      <div className="grid gap-1.5 sm:grid-cols-3">
+                        {currentDay.nutrition.customMetrics.map((cm) => (
+                          <div
+                            key={cm.id}
+                            className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <input
+                                type="text"
+                                aria-label="Custom Metric Name"
+                                value={cm.label}
+                                onChange={(e) =>
+                                  updateCustomMetric(cm.id, { label: e.target.value })
+                                }
+                                className="w-full bg-transparent text-[11px] font-semibold text-[var(--text-muted)] focus:outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => removeCustomMetric(cm.id)}
+                                aria-label={`Delete ${cm.label}`}
+                                className="text-[var(--text-muted)] hover:text-rose-400"
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <div className="flex items-baseline gap-1">
+                              <input
+                                type="text"
+                                aria-label={`${cm.label} Value`}
+                                placeholder="0"
+                                value={cm.value}
+                                onChange={(e) =>
+                                  updateCustomMetric(cm.id, { value: e.target.value })
+                                }
+                                onBlur={() => void flushSaveNow()}
+                                className="w-16 bg-transparent font-bold text-emerald-400 focus:outline-none"
+                              />
+                              <input
+                                type="text"
+                                aria-label={`${cm.label} Unit`}
+                                value={cm.unit}
+                                onChange={(e) =>
+                                  updateCustomMetric(cm.id, { unit: e.target.value })
+                                }
+                                className="w-12 bg-transparent text-[11px] text-[var(--text-muted)] focus:outline-none"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <textarea
+                      id="nutrition-note"
+                      aria-label="Nutrition Notes"
+                      placeholder="Nutrition, hydration, or gut-health notes..."
+                      value={currentDay.nutrition.note}
+                      onChange={(e) =>
+                        updateCurrentDay((d) => ({
+                          ...d,
+                          nutrition: { ...d.nutrition, note: e.target.value },
+                        }))
+                      }
+                      onBlur={() => void flushSaveNow()}
+                      className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {/* SUB-PAGE 3B: 2. FOOD SEARCH (ICMR-NIN INDIA + USDA GLOBAL) */}
+            {(desktopFullView || nutritionSubPage === "search") && (
+              <div className="rounded-2xl border border-amber-500/30 bg-[var(--bg-surface)] p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold">
+                    <Utensils className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                    <span>Food Search (ICMR-NIN India + USDA Global)</span>
+                  </span>
+                  <span className="text-[10px] font-semibold text-amber-400">
+                    {FOOD_DATABASE.length + aiFoodResults.length}+ Foods
+                  </span>
+                </div>
+
+                <form
+                  onSubmit={handleOpenAiFoodSearch}
+                  className="flex flex-wrap items-center gap-2"
+                >
+                  <div className="flex-1 min-w-[180px] flex items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2">
+                    <Search className="h-4 w-4 text-[var(--text-muted)] shrink-0" aria-hidden="true" />
+                    <input
+                      id="food-search-input"
+                      type="search"
+                      aria-label="Search Global or Indian food"
+                      value={foodSearchQuery}
+                      onChange={(e) => setFoodSearchQuery(e.target.value)}
+                      placeholder="Search Chapati, Dal, Paneer, Chicken, Salmon..."
+                      className="w-full bg-transparent text-xs focus:outline-none"
+                    />
+                  </div>
                   <button
                     type="submit"
                     disabled={foodSearchLoading || !foodSearchQuery.trim()}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50 transition"
+                    className="inline-flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-50"
                   >
-                    {foodSearchLoading ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                        <span>Looking up...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Fetch Any Food</span>
-                      </>
-                    )}
+                    <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>{foodSearchLoading ? "Fetching..." : "Fetch Any Food"}</span>
                   </button>
                 </form>
-              </search>
 
-              {/* Category Chips */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {[
-                  "All",
-                  "Indian Staples & Meals",
-                  "Proteins, Poultry & Fish",
-                  "Dairy, Eggs & Plant Protein",
-                  "Hydration & Beverages",
-                ].map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setFoodCategoryFilter(cat)}
-                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
-                      foodCategoryFilter === cat
-                        ? "bg-amber-500 text-slate-950 font-semibold"
-                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    "All",
+                    "Indian Staples & Meals",
+                    "Proteins, Poultry & Fish",
+                    "Dairy, Eggs & Plant Protein",
+                    "Hydration & Beverages",
+                  ].map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setFoodCategoryFilter(cat)}
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                        foodCategoryFilter === cat
+                          ? "bg-amber-500 text-slate-950"
+                          : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
 
-              {/* Search Results + Portion & Gram Customizer Split */}
-              <div className="grid gap-3 lg:grid-cols-12">
-                {/* Matching Foods List */}
-                <div className="lg:col-span-6 space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                  {combinedCatalogMatches.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-muted)]">
-                      No exact local catalog match for &ldquo;{foodSearchQuery}&rdquo;. Click{" "}
-                      <strong className="text-amber-400">Fetch Any Food</strong> above to pull standardized ICMR-NIN / USDA macros automatically.
-                    </div>
-                  ) : (
-                    combinedCatalogMatches.slice(0, 10).map((item) => {
+                <div className="grid gap-3 lg:grid-cols-12">
+                  <div className="lg:col-span-6 space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                    {combinedCatalogMatches.slice(0, 8).map((item) => {
                       const isSelected = selectedFoodItem.id === item.id;
                       const isPinned = (profile.pinnedStaples || []).some(
                         (p) =>
@@ -4608,58 +4860,35 @@ export default function FitnessDashboard({
                       return (
                         <div
                           key={item.id}
-                          className={`flex items-stretch gap-1 rounded-lg border transition ${
+                          className={`flex items-stretch rounded-xl border transition ${
                             isSelected
                               ? "border-amber-400 bg-amber-500/10"
-                              : "border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-amber-500/40"
+                              : "border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                           }`}
                         >
                           <button
                             type="button"
                             onClick={() => handleSelectFoodItem(item)}
-                            className="flex-1 text-left p-2.5"
+                            className="flex-1 p-2 text-left text-xs"
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs font-bold text-[var(--text-primary)]">
-                                {item.name}
-                              </span>
-                              <span className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                                {item.source}
-                              </span>
-                            </div>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
-                              <span>Per 100g:</span>
-                              <strong className="text-amber-400">
-                                {item.caloriesPer100g} kcal
-                              </strong>
+                            <div className="font-bold">{item.name}</div>
+                            <div className="text-[10px] text-[var(--text-muted)]">
+                              100g: {item.caloriesPer100g} kcal ·{" "}
                               <span className="text-emerald-400">
                                 {item.proteinPer100g}g P
-                              </span>
-                              <span className="text-sky-400">
-                                {item.carbsPer100g}g C
-                              </span>
-                              <span className="text-purple-400">
-                                {item.fatsPer100g}g F
-                              </span>
-                              <span className="text-teal-400">
-                                {item.fiberPer100g}g Fib
-                              </span>
+                              </span>{" "}
+                              · {item.source}
                             </div>
                           </button>
                           <button
                             type="button"
                             onClick={() => togglePinFoodItem(item)}
-                            title={
-                              isPinned
-                                ? `Unpin ${item.name} from Your Staples`
-                                : `Pin ${item.name} to Your Staples`
-                            }
                             aria-label={
                               isPinned
-                                ? `Unpin ${item.name} from staples`
-                                : `Pin ${item.name} to staples`
+                                ? `Unpin ${item.name} from Favs`
+                                : `Pin ${item.name} to Favs`
                             }
-                            className={`px-2 flex items-center justify-center border-l border-[var(--border-subtle)]/60 rounded-r-lg transition ${
+                            className={`px-2.5 border-l border-[var(--border-subtle)] ${
                               isPinned
                                 ? "text-emerald-400 bg-emerald-500/10"
                                 : "text-[var(--text-muted)] hover:text-emerald-400"
@@ -4669,90 +4898,67 @@ export default function FitnessDashboard({
                           </button>
                         </div>
                       );
-                    })
-                  )}
-                </div>
-
-                {/* Selected Food Portion & Weight Customizer */}
-                <div className="lg:col-span-6 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-3">
-                  <div className="flex items-start justify-between gap-2 border-b border-[var(--border-subtle)] pb-2">
-                    <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-400">
-                        Customize Portion &amp; Weight
-                      </div>
-                      <div className="text-xs sm:text-sm font-bold">
-                        {selectedFoodItem.name}
-                      </div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        {selectedFoodItem.category} · {selectedFoodItem.source}
-                      </div>
-                    </div>
-                    <div className="inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[11px] font-semibold text-amber-400">
-                      <Scale className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>{foodPreview.totalGrams} g/ml</span>
-                    </div>
+                    })}
                   </div>
 
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    <div className="sm:col-span-2">
-                      <label
-                        htmlFor="food-portion-select"
-                        className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
-                      >
-                        Portion Size (with Weight Indicator)
-                      </label>
-                      <select
-                        id="food-portion-select"
-                        value={selectedPortionIndex}
-                        onChange={(e) => {
-                          const idx = Number(e.target.value);
-                          setSelectedPortionIndex(idx);
-                          if (idx >= 0 && selectedFoodItem.portions[idx]) {
-                            setCustomWeightGrams(
-                              selectedFoodItem.portions[idx].grams
-                            );
-                          }
-                        }}
-                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium focus:border-amber-400 focus:outline-none"
-                      >
-                        {selectedFoodItem.portions.map((p, idx) => (
-                          <option key={p.label} value={idx}>
-                            {p.label}
-                          </option>
-                        ))}
-                        <option value={-1}>
-                          Custom Weight (grams / ml)
+                  {/* Portion & Gram Calculator */}
+                  <div className="lg:col-span-6 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold">{selectedFoodItem.name}</span>
+                      <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-400">
+                        <Scale className="h-3.5 w-3.5" aria-hidden="true" />
+                        {foodPreview.totalGrams}g
+                      </span>
+                    </div>
+
+                    <select
+                      aria-label="Portion Size"
+                      value={selectedPortionIndex}
+                      onChange={(e) => {
+                        const idx = Number(e.target.value);
+                        setSelectedPortionIndex(idx);
+                        if (idx >= 0 && selectedFoodItem.portions[idx]) {
+                          setCustomWeightGrams(
+                            selectedFoodItem.portions[idx].grams
+                          );
+                        }
+                      }}
+                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs"
+                    >
+                      {selectedFoodItem.portions.map((p, idx) => (
+                        <option key={p.label} value={idx}>
+                          {p.label}
                         </option>
-                      </select>
-                    </div>
+                      ))}
+                      <option value={-1}>Custom Weight (g/ml)</option>
+                    </select>
 
-                    <div>
-                      <label
-                        htmlFor="food-grams-input"
-                        className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
-                      >
-                        Base Weight (grams / ml)
-                      </label>
-                      <DecimalInput
-                        id="food-grams-input"
-                        allowDecimal
-                        min={1}
-                        value={customWeightGrams}
-                        onValueChange={(nextGrams) => {
-                          setSelectedPortionIndex(-1);
-                          setCustomWeightGrams(Math.max(1, nextGrams));
-                        }}
-                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label
+                          htmlFor="food-grams-input"
+                          className="block text-[10px] text-[var(--text-muted)]"
+                        >
+                          Grams
+                        </label>
+                        <DecimalInput
+                          id="food-grams-input"
+                          allowDecimal
+                          min={1}
+                          value={customWeightGrams}
+                          onValueChange={(nextGrams) => {
+                            setSelectedPortionIndex(-1);
+                            setCustomWeightGrams(Math.max(1, nextGrams));
+                          }}
+                          className="mt-0.5 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs font-bold"
+                        />
+                      </div>
                       <div>
                         <label
                           htmlFor="food-quantity-input"
-                          className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                          className="block text-[10px] text-[var(--text-muted)]"
                         >
-                          Qty / Servings
+                          Qty
                         </label>
                         <DecimalInput
                           id="food-quantity-input"
@@ -4763,13 +4969,13 @@ export default function FitnessDashboard({
                           onValueChange={(nextQty) =>
                             setFoodQuantity(Math.max(0.25, nextQty || 1))
                           }
-                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-bold focus:border-amber-400 focus:outline-none"
+                          className="mt-0.5 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs font-bold"
                         />
                       </div>
                       <div>
                         <label
                           htmlFor="food-time-input"
-                          className="block text-[11px] font-medium text-[var(--text-muted)] mb-1"
+                          className="block text-[10px] text-[var(--text-muted)]"
                         >
                           Time
                         </label>
@@ -4778,1401 +4984,723 @@ export default function FitnessDashboard({
                           type="time"
                           value={foodTime}
                           onChange={(e) => setFoodTime(e.target.value)}
-                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-xs font-medium focus:border-amber-400 focus:outline-none"
+                          className="mt-0.5 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-1 text-xs"
                         />
                       </div>
                     </div>
-                  </div>
 
-                  {/* Live Portion Nutrition Breakdown */}
-                  <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-center text-[11px]">
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Calories</div>
-                      <div className="font-bold text-amber-400">{foodPreview.calories}</div>
+                    <div className="grid grid-cols-4 gap-1 rounded-lg bg-[var(--bg-surface)] p-2 text-center text-[11px]">
+                      <div>
+                        <div className="text-[10px] text-[var(--text-muted)]">kcal</div>
+                        <strong className="text-amber-400">{foodPreview.calories}</strong>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-[var(--text-muted)]">Prot</div>
+                        <strong className="text-emerald-400">{foodPreview.protein}g</strong>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-[var(--text-muted)]">Carbs</div>
+                        <strong className="text-sky-400">{foodPreview.carbs}g</strong>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-[var(--text-muted)]">Fats</div>
+                        <strong className="text-purple-400">{foodPreview.fats}g</strong>
+                      </div>
                     </div>
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Protein</div>
-                      <div className="font-bold text-emerald-400">{foodPreview.protein}g</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Carbs</div>
-                      <div className="font-bold text-sky-400">{foodPreview.carbs}g</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Fats</div>
-                      <div className="font-bold text-purple-400">{foodPreview.fats}g</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Fiber</div>
-                      <div className="font-bold text-teal-400">{foodPreview.fiberGrams}g</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-[var(--text-muted)]">Water</div>
-                      <div className="font-bold text-cyan-400">{foodPreview.waterLiters}L</div>
-                    </div>
-                  </div>
 
-                  <button
-                    type="button"
-                    onClick={handleAddFoodFromSearch}
-                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 transition"
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAddFoodFromSearch();
+                        setNutritionSubPage("favs");
+                      }}
+                      className="w-full rounded-xl bg-emerald-500 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+                    >
+                      + Add {selectedFoodItem.name} ({foodPreview.totalGrams}g)
+                    </button>
+                  </div>
+                </div>
+
+                {foodSearchMessage && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-400"
                   >
-                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>
-                      Add {selectedFoodItem.name} ({foodPreview.totalGrams}g) to Daily Totals
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              {foodSearchMessage && (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400"
-                >
-                  {foodSearchMessage}
-                </div>
-              )}
-            </div>
-
-            {/* Meal Log Breakdown */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                  Meals &amp; Timed Nutrition Log
-                </h3>
-                <button
-                  type="button"
-                  onClick={addMeal}
-                  className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-400 hover:bg-amber-500/20"
-                >
-                  <Plus className="h-3 w-3" aria-hidden="true" />
-                  <span>Add Custom Meal</span>
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                {currentDay.nutrition.meals.length === 0 && (
-                  <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3.5 py-4 text-center text-xs text-[var(--text-muted)]">
-                    No meals logged for {selectedDate} yet. Use{" "}
-                    <strong className="text-emerald-400">Your Frequently Eaten Staples</strong> above, search any food, or click{" "}
-                    <strong className="text-amber-400">Add Custom Meal</strong>.
+                    {foodSearchMessage}
                   </div>
                 )}
-                {currentDay.nutrition.meals.map((meal) => (
-                  <div
-                    key={meal.id}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 sm:p-3 space-y-2"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="time"
-                        aria-label="Meal Time"
-                        value={meal.time}
-                        onChange={(e) =>
-                          updateMeal(meal.id, { time: e.target.value })
-                        }
-                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs font-medium"
-                      />
-                      <div className="flex-1 min-w-[180px] flex flex-wrap items-center gap-2">
-                        <input
-                          type="text"
-                          aria-label="Meal Description"
-                          value={meal.name}
-                          onChange={(e) =>
-                            updateMeal(meal.id, { name: e.target.value })
-                          }
-                          onBlur={() => void flushSaveNow()}
-                          placeholder="Meal / food items..."
-                          className="flex-1 min-w-[140px] bg-transparent text-xs sm:text-sm font-semibold focus:outline-none"
-                        />
-                        {meal.weightGrams ? (
-                          <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">
-                            {meal.weightGrams}g
-                          </span>
-                        ) : null}
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-amber-400">kcal</span>
-                          <DecimalInput
-                            allowDecimal={false}
-                            min={0}
-                            value={meal.calories}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { calories: Math.round(val) })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-12 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-emerald-400">P(g)</span>
-                          <DecimalInput
-                            allowDecimal={false}
-                            min={0}
-                            value={meal.protein}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { protein: Math.round(val) })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-sky-400">C(g)</span>
-                          <DecimalInput
-                            allowDecimal={false}
-                            min={0}
-                            value={meal.carbs}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { carbs: Math.round(val) })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-purple-400">F(g)</span>
-                          <DecimalInput
-                            allowDecimal={false}
-                            min={0}
-                            value={meal.fats}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { fats: Math.round(val) })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-teal-400">Fib(g)</span>
-                          <DecimalInput
-                            allowDecimal
-                            min={0}
-                            value={meal.fiberGrams ?? 0}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { fiberGrams: val })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 rounded-md bg-[var(--bg-surface)] px-2 py-1">
-                          <span className="text-[10px] text-cyan-400">H2O(L)</span>
-                          <DecimalInput
-                            allowDecimal
-                            min={0}
-                            value={meal.waterLiters ?? 0}
-                            onValueChange={(val) =>
-                              updateMeal(meal.id, { waterLiters: val })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-10 bg-transparent font-bold text-right tabular-nums focus:outline-none"
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => removeMeal(meal.id)}
-                          aria-label={`Remove ${meal.name}`}
-                          className="p-1 text-[var(--text-muted)] hover:text-rose-400"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        </button>
-                      </div>
-                    </div>
-
-                    <input
-                      type="text"
-                      aria-label={`Note for ${meal.name}`}
-                      placeholder="Meal note (digestion, pre/post workout context, portion details)..."
-                      value={meal.note}
-                      onChange={(e) =>
-                        updateMeal(meal.id, { note: e.target.value })
-                      }
-                      onBlur={() => void flushSaveNow()}
-                      className="w-full rounded-lg bg-[var(--bg-surface)] px-2.5 py-1 text-xs text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Custom General Health & Supplement Metrics */}
-            <div className="space-y-2.5 pt-1">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                  General Health, Supplements & Biomarker Metrics
-                </h3>
-                <button
-                  type="button"
-                  onClick={addCustomMetric}
-                  className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20"
-                >
-                  <Plus className="h-3 w-3" aria-hidden="true" />
-                  <span>Add Custom Metric</span>
-                </button>
-              </div>
-
-              <div className="grid gap-2.5 sm:grid-cols-3">
-                {currentDay.nutrition.customMetrics.map((cm) => (
-                  <div
-                    key={cm.id}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <input
-                        type="text"
-                        aria-label="Custom Metric Name"
-                        value={cm.label}
-                        onChange={(e) =>
-                          updateCustomMetric(cm.id, { label: e.target.value })
-                        }
-                        className="w-full bg-transparent text-xs font-semibold text-[var(--text-muted)] focus:text-[var(--text-primary)] focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => removeCustomMetric(cm.id)}
-                        aria-label={`Delete ${cm.label}`}
-                        className="text-[var(--text-muted)] hover:text-rose-400 text-xs px-1"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <div className="flex items-baseline gap-1.5">
-                      <input
-                        type="text"
-                        aria-label={`${cm.label} Value`}
-                        placeholder="0"
-                        value={cm.value}
-                        onChange={(e) =>
-                          updateCustomMetric(cm.id, { value: e.target.value })
-                        }
-                        onBlur={() => void flushSaveNow()}
-                        className="w-24 bg-transparent text-base font-bold text-emerald-400 focus:outline-none"
-                      />
-                      <input
-                        type="text"
-                        aria-label={`${cm.label} Unit`}
-                        value={cm.unit}
-                        onChange={(e) =>
-                          updateCustomMetric(cm.id, { unit: e.target.value })
-                        }
-                        onBlur={() => void flushSaveNow()}
-                        placeholder="unit"
-                        className="w-16 bg-transparent text-xs text-[var(--text-muted)] focus:outline-none"
-                      />
-                    </div>
-                    <input
-                      type="text"
-                      aria-label={`Note for ${cm.label}`}
-                      placeholder="Optional note..."
-                      value={cm.note}
-                      onChange={(e) =>
-                        updateCustomMetric(cm.id, { note: e.target.value })
-                      }
-                      onBlur={() => void flushSaveNow()}
-                      className="w-full rounded-md bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-muted)] focus:outline-none"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Overall Nutrition Note */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="nutrition-note"
-                  className="block text-xs font-medium text-[var(--text-muted)]"
-                >
-                  Nutrition, Hydration &amp; Gut Health Notes
-                </label>
-                <span className="text-[10px] text-[var(--text-muted)]">
-                  Auto-saved &amp; visible in History
-                </span>
-              </div>
-              <textarea
-                id="nutrition-note"
-                placeholder="Type any notes on appetite, meal timing, supplements, or energy availability..."
-                value={currentDay.nutrition.note}
-                onChange={(e) =>
-                  updateCurrentDay((d) => ({
-                    ...d,
-                    nutrition: { ...d.nutrition, note: e.target.value },
-                  }))
-                }
-                onBlur={() => void flushSaveNow()}
-                className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-amber-500 focus:outline-none"
-              />
-            </div>
-          </section>
-        )}
-
-        {/* =========================================================
-            WHOOP-STYLE DAILY HABITS & SUPPLEMENTS JOURNAL (100+ Catalog)
-           ========================================================= */}
-        {(activeTab === "all" || activeTab === "nutrition" || activeTab === "sleep") && (
-          <section
-            ref={habitsSectionRef}
-            aria-labelledby="heading-habits-journal"
-            className="rounded-2xl border border-purple-500/30 bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-purple-500/15 text-purple-400">
-                  <ListChecks className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2
-                    id="heading-habits-journal"
-                    className="text-base font-bold sm:text-lg"
-                  >
-                    Daily Habits &amp; Supplements Journal
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    WHOOP-style customizable tracker ({loggedHabitsCount}/{activeHabits.length} logged for {selectedDate} · leave any blank or skip)
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      checkIn: { ...d.checkIn, habitsSkipped: true },
-                    }))
-                  }
-                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
-                    currentDay.checkIn?.habitsSkipped
-                      ? "border-purple-500/50 bg-purple-500/15 text-purple-300"
-                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>
-                    {currentDay.checkIn?.habitsSkipped ? "Skipped Today ✓" : "Skip Habits"}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowHabitCatalogDialog(true)}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-purple-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-purple-400 transition"
-                >
-                  <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Choose Habits ({HABIT_CATALOG.length}+ Catalog)</span>
-                </button>
-              </div>
-            </div>
-
-            {activeHabits.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-center space-y-2 text-xs">
-                <div className="font-semibold">No active habits selected</div>
-                <p className="text-[var(--text-muted)]">
-                  Pick your daily supplements and recovery habits from our {HABIT_CATALOG.length}-habit catalog.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setShowHabitCatalogDialog(true)}
-                  className="inline-flex items-center gap-1 rounded-lg bg-purple-500 px-3 py-1.5 font-semibold text-slate-950"
-                >
-                  Browse {HABIT_CATALOG.length} Habits
-                </button>
-              </div>
-            ) : (
-              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                {activeHabits.map((habit) => {
-                  const log = currentDay.habitLogs?.[habit.id];
-                  const isYes = log?.status === "yes";
-                  const isNo = log?.status === "no";
-                  const val = log?.value ?? "";
-                  return (
-                    <div
-                      key={habit.id}
-                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-2"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold truncate">
-                            {habit.name}
-                          </div>
-                          <div className="text-[10px] text-[var(--text-muted)]">
-                            {habit.category}
-                          </div>
-                        </div>
-                        {(isYes || isNo || val.trim().length > 0) && (
-                          <button
-                            type="button"
-                            onClick={() => updateHabitEntry(habit.id, null)}
-                            className="text-[10px] text-[var(--text-muted)] hover:text-rose-400"
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-
-                      {habit.inputType === "yes_no" ? (
-                        <div className="grid grid-cols-3 gap-1 text-[11px]">
-                          <button
-                            type="button"
-                            aria-pressed={isYes}
-                            onClick={() =>
-                              updateHabitEntry(habit.id, { status: "yes" })
-                            }
-                            className={`rounded-lg py-1.5 font-semibold transition ${
-                              isYes
-                                ? "bg-emerald-500 text-slate-950"
-                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-emerald-500/40"
-                            }`}
-                          >
-                            Yes
-                          </button>
-                          <button
-                            type="button"
-                            aria-pressed={isNo}
-                            onClick={() =>
-                              updateHabitEntry(habit.id, { status: "no" })
-                            }
-                            className={`rounded-lg py-1.5 font-semibold transition ${
-                              isNo
-                                ? "bg-rose-500 text-white"
-                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-rose-500/40"
-                            }`}
-                          >
-                            No
-                          </button>
-                          <button
-                            type="button"
-                            aria-pressed={!isYes && !isNo}
-                            onClick={() => updateHabitEntry(habit.id, null)}
-                            className={`rounded-lg py-1.5 font-medium transition ${
-                              !isYes && !isNo
-                                ? "border border-purple-500/40 bg-purple-500/10 text-purple-300"
-                                : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]"
-                            }`}
-                          >
-                            Blank
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            aria-label={`${habit.name} dosage`}
-                            placeholder={habit.defaultValue || "0"}
-                            value={val}
-                            onChange={(e) =>
-                              updateHabitEntry(habit.id, {
-                                value: e.target.value,
-                                unit: habit.unit,
-                              })
-                            }
-                            onBlur={() => void flushSaveNow()}
-                            className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs font-bold text-emerald-400 focus:border-purple-400 focus:outline-none"
-                          />
-                          <span className="text-xs text-[var(--text-muted)]">
-                            {habit.unit || "units"}
-                          </span>
-                          {habit.defaultValue && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                updateHabitEntry(habit.id, {
-                                  value: habit.defaultValue,
-                                  unit: habit.unit,
-                                })
-                              }
-                              className="ml-auto rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
-                            >
-                              {habit.defaultValue} {habit.unit}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
               </div>
             )}
           </section>
         )}
 
         {/* =========================================================
-            MODULE 3: SLEEP & RECOVERY SUFFICIENCY
+            SCREEN 4: HABITS (WHOOP 5.0 JOURNAL), GEMINI AI & TRENDS
            ========================================================= */}
-        {(activeTab === "all" || activeTab === "sleep") && (
-          <section
-            aria-labelledby="heading-sleep"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
-                  <Moon className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2
-                    id="heading-sleep"
-                    className="text-base font-bold sm:text-lg"
+        {showMore && (
+          <section aria-label="Habits, AI Coach and Trends" className="space-y-3">
+            {!desktopFullView && (
+              <div
+                role="tablist"
+                aria-label="Habits and AI Sub-Pages"
+                className="grid grid-cols-3 gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-1"
+              >
+                {(
+                  [
+                    {
+                      id: "journal",
+                      label: `1. Journal (${loggedHabitsCount}/${activeHabits.length})`,
+                    },
+                    { id: "ai", label: "2. Gemini AI" },
+                    { id: "trends", label: "3. History & Trends" },
+                  ] as const
+                ).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={moreSubPage === p.id}
+                    onClick={() => setMoreSubPage(p.id)}
+                    className={`rounded-lg py-1.5 text-[11px] sm:text-xs font-bold transition ${
+                      moreSubPage === p.id
+                        ? "bg-purple-500 text-slate-950 shadow-xs"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
                   >
-                    3. Sleep &amp; Recovery
-                  </h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    Enter your total sleep hours &amp; 1–10 sleep quality rating — Resting HR, HRV, Deep &amp; REM stages auto-approximate for a 70 kg Indian man
-                  </p>
-                </div>
+                    {p.label}
+                  </button>
+                ))}
               </div>
+            )}
 
-              <div className="flex items-center gap-2 text-xs">
-                <label
-                  htmlFor="baseline-sleep-need"
-                  className="text-[var(--text-muted)]"
-                >
-                  Base Sleep Need (hrs):
-                </label>
-                <DecimalInput
-                  id="baseline-sleep-need"
-                  allowDecimal
-                  min={4}
-                  max={14}
-                  value={profile.baselineSleepNeedHours}
-                  onValueChange={(nextBase) =>
-                    updateProfileMeta((p) => ({
-                      ...p,
-                      baselineSleepNeedHours: nextBase > 0 ? nextBase : 7.5,
-                    }))
-                  }
-                  onBlur={() => void flushSaveNow()}
-                  className="w-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-center font-bold text-indigo-400"
-                />
-              </div>
-            </div>
-
-            {/* Direct Sleep Hours + Quality Logger (Calibrated for 70 kg Indian Adult Male) */}
-            <div className="rounded-xl border border-indigo-500/30 bg-[var(--bg-elevated)] p-3.5 sm:p-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-xs font-bold text-indigo-400">
-                  Direct Sleep Entry · 70 kg Indian Male Baseline Approximation
-                </div>
-                <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                  0–23 hrs supported (decimals like 1.5h or 7.5h allowed)
-                </span>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label
-                      htmlFor="sleep-total"
-                      className="text-xs font-semibold text-[var(--text-primary)]"
-                    >
-                      Total Sleep Duration (0–23 hrs)
-                    </label>
-                    <span className="text-[11px] text-[var(--text-muted)]">
-                      Strain Need: {analysis.requiredSleepHours}h
-                    </span>
+            {/* SUB-PAGE 4A: WHOOP 5.0 DAILY JOURNAL */}
+            {(desktopFullView || moreSubPage === "journal") && (
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm sm:text-base font-bold">
+                      Daily Journal · {loggedHabitsCount} of {activeHabits.length}{" "}
+                      answered
+                    </h2>
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      WHOOP-style behaviors mapped to next-day Recovery
+                    </p>
                   </div>
-                  <div className="flex items-baseline gap-2">
-                    <DecimalInput
-                      id="sleep-total"
-                      allowDecimal
-                      min={0}
-                      max={23}
-                      value={currentDay.sleep.totalHours}
-                      onValueChange={(nextHours) =>
-                        updateSleepWith70kgIndianBaseline(
-                          nextHours,
-                          currentDay.sleep.sleepQuality
-                        )
-                      }
-                      onBlur={() => void flushSaveNow()}
-                      className="w-24 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold tabular-nums text-indigo-400 focus:border-indigo-400 focus:outline-none"
-                    />
-                    <span className="text-xs text-[var(--text-muted)]">
-                      hours slept
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9].map((hrs) => (
-                      <button
-                        key={hrs}
-                        type="button"
-                        aria-pressed={currentDay.sleep.totalHours === hrs}
-                        onClick={() =>
-                          updateSleepWith70kgIndianBaseline(
-                            hrs,
-                            currentDay.sleep.sleepQuality
-                          )
-                        }
-                        className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition ${
-                          currentDay.sleep.totalHours === hrs
-                            ? "bg-indigo-500 text-slate-950"
-                            : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-indigo-400/50"
-                        }`}
-                      >
-                        {hrs}h
-                      </button>
-                    ))}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowHabitCatalogDialog(true)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-purple-500/40 bg-purple-500/15 px-2.5 py-1.5 text-xs font-bold text-purple-300"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Customize ({HABIT_CATALOG.length}+)</span>
+                  </button>
                 </div>
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label
-                      htmlFor="sleep-quality"
-                      className="text-xs font-semibold text-[var(--text-primary)]"
-                    >
-                      Rate Sleep Quality (1 to 10)
-                    </label>
-                    <span className="text-[11px] text-amber-400 font-semibold">
-                      {currentDay.sleep.sleepQuality} / 10
-                    </span>
-                  </div>
-                  <div className="flex items-baseline gap-2">
-                    <DecimalInput
-                      id="sleep-quality"
-                      allowDecimal={false}
-                      min={1}
-                      max={10}
-                      emptyAsZero={false}
-                      value={currentDay.sleep.sleepQuality}
-                      onValueChange={(nextQ) =>
-                        updateSleepWith70kgIndianBaseline(
-                          currentDay.sleep.totalHours,
-                          Math.max(1, Math.min(10, Math.round(nextQ || 1)))
-                        )
-                      }
-                      onBlur={() => void flushSaveNow()}
-                      className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-2xl font-extrabold tabular-nums text-amber-400 focus:border-amber-400 focus:outline-none"
-                    />
-                    <span className="text-xs text-[var(--text-muted)]">
-                      out of 10
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((q) => (
-                      <button
-                        key={q}
-                        type="button"
-                        aria-label={`Rate sleep quality ${q} out of 10`}
-                        aria-pressed={currentDay.sleep.sleepQuality === q}
-                        onClick={() =>
-                          updateSleepWith70kgIndianBaseline(
-                            currentDay.sleep.totalHours,
-                            q
-                          )
-                        }
-                        className={`min-w-[28px] rounded-md px-2 py-1 text-[11px] font-bold transition ${
-                          currentDay.sleep.sleepQuality === q
-                            ? "bg-amber-500 text-slate-950"
-                            : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)] hover:border-amber-400/50"
-                        }`}
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <p className="text-[11px] text-[var(--text-muted)]">
-                <strong>Standard Indian 70 kg Man Approximation Active:</strong>{" "}
-                Changing sleep duration or 1–10 quality automatically updates estimated Deep Sleep (SWS), REM, Resting HR (~62 bpm baseline), and HRV (~60 ms baseline). Override any individual wearable value below if needed.
-              </p>
-            </div>
-
-            {/* Approximated / Wearable Override Biometrics Inline Grid */}
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="sleep-deep"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Deep Sleep / SWS (hrs · est.)
-                </label>
-                <div className="mt-1 flex items-baseline gap-1.5">
-                  <DecimalInput
-                    id="sleep-deep"
-                    allowDecimal
-                    min={0}
-                    max={12}
-                    value={currentDay.sleep.deepSleepHours}
-                    onValueChange={(val) =>
+                {/* Speed Actions: Same as Yesterday + Clear + Skip */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!hasPriorHabitsToCopy}
+                    onClick={applySameHabitsAsYesterday}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-purple-500/45 bg-purple-500/15 py-2 text-xs font-bold text-purple-300 hover:bg-purple-500/25 disabled:opacity-45 transition"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Same as Yesterday</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearAllHabitsToday}
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-xs font-semibold text-[var(--text-muted)]"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
                       updateCurrentDay((d) => ({
                         ...d,
-                        sleep: { ...d.sleep, deepSleepHours: val },
+                        checkIn: { ...d.checkIn, habitsSkipped: true },
                       }))
                     }
-                    onBlur={() => void flushSaveNow()}
-                    className="w-16 bg-transparent text-xl font-extrabold tabular-nums text-emerald-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">
-                    hrs ({analysis.deepSleepPercentage}% · min {analysis.requiredDeepSleepHours}h)
-                  </span>
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-xs font-semibold text-[var(--text-muted)]"
+                  >
+                    {currentDay.checkIn?.habitsSkipped ? "Skipped ✓" : "Skip"}
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {activeHabits.map((habit) => {
+                    const log = currentDay.habitLogs?.[habit.id];
+                    const isYes =
+                      log?.status === "yes" ||
+                      (habit.inputType === "dosage" &&
+                        log?.status !== "no" &&
+                        Boolean(log?.value && log.value.trim().length > 0));
+                    const isNo = log?.status === "no";
+                    const impact = computeHabitRecoveryImpact(profile, habit.id);
+
+                    return (
+                      <div
+                        key={habit.id}
+                        className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-bold truncate">{habit.name}</div>
+                            <div
+                              className={`text-[10px] font-semibold ${
+                                impact.deltaPct === null
+                                  ? "text-[var(--text-muted)]"
+                                  : impact.deltaPct >= 0
+                                  ? "text-emerald-400"
+                                  : "text-rose-400"
+                              }`}
+                            >
+                              {impact.deltaPct !== null
+                                ? `${impact.deltaPct >= 0 ? "+" : ""}${impact.deltaPct}% Recovery Impact`
+                                : `${habit.category} · Log ${impact.logsNeeded} more days for impact`}
+                            </div>
+                          </div>
+
+                          {/* WHOOP 5.0 NO | YES Segmented Toggle */}
+                          <div className="inline-flex rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-0.5 shrink-0">
+                            <button
+                              type="button"
+                              aria-pressed={isNo}
+                              onClick={() =>
+                                updateHabitEntry(
+                                  habit.id,
+                                  isNo ? null : { status: "no", value: "" }
+                                )
+                              }
+                              className={`rounded-lg px-3 py-1 text-[11px] font-bold transition ${
+                                isNo
+                                  ? "bg-rose-500 text-white"
+                                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                              }`}
+                            >
+                              NO
+                            </button>
+                            <button
+                              type="button"
+                              aria-pressed={isYes}
+                              onClick={() =>
+                                updateHabitEntry(
+                                  habit.id,
+                                  isYes
+                                    ? null
+                                    : {
+                                        status: "yes",
+                                        ...(habit.inputType === "dosage"
+                                          ? {
+                                              value:
+                                                log?.value ||
+                                                habit.defaultValue ||
+                                                "1",
+                                              unit: habit.unit,
+                                              time: log?.time || "09:00",
+                                            }
+                                          : {}),
+                                      }
+                                )
+                              }
+                              className={`rounded-lg px-3 py-1 text-[11px] font-bold transition ${
+                                isYes
+                                  ? "bg-emerald-500 text-slate-950"
+                                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                              }`}
+                            >
+                              YES
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Conditional Dosage & Time Expansion when YES is selected */}
+                        {habit.inputType === "dosage" && isYes && (
+                          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1.5">
+                            <span className="text-[11px] font-semibold text-emerald-400">
+                              Dose:
+                            </span>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              aria-label={`${habit.name} dosage`}
+                              value={log?.value ?? habit.defaultValue ?? ""}
+                              onChange={(e) =>
+                                updateHabitEntry(habit.id, {
+                                  status: "yes",
+                                  value: e.target.value,
+                                  unit: habit.unit,
+                                })
+                              }
+                              onBlur={() => void flushSaveNow()}
+                              className="w-16 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-center text-xs font-bold text-emerald-400"
+                            />
+                            <span className="text-[11px] text-[var(--text-muted)]">
+                              {habit.unit || "units"}
+                            </span>
+                            <input
+                              type="time"
+                              aria-label={`${habit.name} time`}
+                              value={log?.time || "09:00"}
+                              onChange={(e) =>
+                                updateHabitEntry(habit.id, {
+                                  status: "yes",
+                                  time: e.target.value,
+                                })
+                              }
+                              className="ml-auto rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[11px]"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
+            )}
 
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="sleep-rem"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  REM Sleep (hrs · est.)
-                </label>
-                <DecimalInput
-                  id="sleep-rem"
-                  allowDecimal
-                  min={0}
-                  max={12}
-                  value={currentDay.sleep.remSleepHours}
-                  onValueChange={(val) =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      sleep: { ...d.sleep, remSleepHours: val },
-                    }))
-                  }
-                  onBlur={() => void flushSaveNow()}
-                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-sky-400 focus:outline-none"
-                />
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="sleep-rhr"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Resting HR (bpm · 70kg est.)
-                </label>
-                <DecimalInput
-                  id="sleep-rhr"
-                  allowDecimal={false}
-                  min={0}
-                  max={180}
-                  value={currentDay.sleep.restingHeartRate}
-                  onValueChange={(val) =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      sleep: {
-                        ...d.sleep,
-                        restingHeartRate: Math.round(val),
-                      },
-                    }))
-                  }
-                  onBlur={() => void flushSaveNow()}
-                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-rose-400 focus:outline-none"
-                />
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5">
-                <label
-                  htmlFor="sleep-hrv"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  HRV (ms · 70kg est.)
-                </label>
-                <DecimalInput
-                  id="sleep-hrv"
-                  allowDecimal={false}
-                  min={0}
-                  max={250}
-                  value={currentDay.sleep.hrvMs}
-                  onValueChange={(val) =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      sleep: { ...d.sleep, hrvMs: Math.round(val) },
-                    }))
-                  }
-                  onBlur={() => void flushSaveNow()}
-                  className="mt-1 w-full bg-transparent text-xl font-bold tabular-nums text-teal-400 focus:outline-none"
-                />
-              </div>
-            </div>
-
-            {/* Upgraded 3-Signal Actionable Recovery & Sleep Sufficiency Diagnostic */}
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <span className="font-semibold">
-                  Cross-Module Sufficiency Diagnostic (Sleep × Training × Fuel)
-                </span>
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  Physiological Check · Actionable Next-Day Calibration
-                </span>
-              </div>
-
-              <div className="grid gap-2.5 md:grid-cols-3 text-xs">
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
-                  <div className="font-semibold text-indigo-400">
-                    1. Sleep vs. Training Load ({analysis.strainScore}/21 Strain)
+            {/* SUB-PAGE 4B: GEMINI 4 INTERACTIONS AI HUB */}
+            {(desktopFullView || moreSubPage === "ai") && (
+              <div className="rounded-2xl border border-emerald-500/30 bg-[var(--bg-surface)] p-4 space-y-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                    <h2 className="text-sm font-bold">Gemini 4 Recovery &amp; Smart Log</h2>
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    {currentDay.sleep.totalHours === 0
-                      ? "Enter your total sleep hours above to see whether rest covers today's workout demand."
-                      : analysis.isSleepSufficientForWorkout &&
-                        analysis.isDeepSleepSufficient
-                      ? `Covered — ${currentDay.sleep.totalHours}h total and ${currentDay.sleep.deepSleepHours}h deep sleep meet the ${analysis.requiredSleepHours}h need for ${analysis.totalSets} sets. Keep progressive overload active.`
-                      : `Sleep Debt (${Math.abs(analysis.sleepDebtDelta).toFixed(1)}h short) — Tonight aim for ${analysis.requiredSleepHours}h total sleep, finish dinner 90m before bed, or hold RIR at 2 reps in reserve tomorrow.`}
-                  </p>
-                </div>
-
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
-                  <div className="font-semibold text-emerald-400">
-                    2. Protein &amp; Energy Synthesis Check
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      aria-label="Gemini 4 Model"
+                      value={geminiModel}
+                      onChange={(e) =>
+                        setGeminiModel(
+                          e.target.value as "gemini-4-hydrogen" | "gemini-4-argon"
+                        )
+                      }
+                      className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[11px] font-mono"
+                    >
+                      <option value="gemini-4-hydrogen">gemini-4-hydrogen</option>
+                      <option value="gemini-4-argon">gemini-4-argon</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleOptimizeDay}
+                      disabled={geminiLoadingMode !== null}
+                      className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 disabled:opacity-60"
+                    >
+                      <Wand2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {geminiLoadingMode === "optimize-day"
+                          ? "Analyzing..."
+                          : "Optimize Day"}
+                      </span>
+                    </button>
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    {currentDay.nutrition.calories === 0 &&
-                    currentDay.nutrition.protein === 0
-                      ? "Log meals in Module 2 to verify whether overnight amino acid & glycogen supply supports muscle repair."
-                      : analysis.isNutritionSufficientForWorkout
-                      ? `Optimal Anabolic Window — ${currentDay.nutrition.protein}g protein (~${(currentDay.nutrition.protein / 70).toFixed(1)} g/kg for 70 kg) and ${currentDay.nutrition.calories} kcal fuel overnight tissue repair.`
-                      : `Under-Fueled — You are ${Math.max(0, currentDay.nutrition.proteinTarget - currentDay.nutrition.protein)}g protein and ${Math.max(0, currentDay.nutrition.calorieTarget - currentDay.nutrition.calories)} kcal below target; add a protein-rich evening meal before sleeping.`}
-                  </p>
                 </div>
 
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 space-y-1">
-                  <div className="font-semibold text-teal-400">
-                    3. Autonomic Read (70 kg RHR &amp; HRV Proxy)
+                {geminiStatusMessage && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400"
+                  >
+                    {geminiStatusMessage}
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    {currentDay.sleep.totalHours === 0
-                      ? "Waiting for sleep duration + 1–10 rating to model morning Resting HR and HRV balance."
-                      : `Est. RHR ${currentDay.sleep.restingHeartRate} bpm & HRV ${currentDay.sleep.hrvMs} ms (Quality ${currentDay.sleep.sleepQuality}/10). ${
-                          currentDay.sleep.hrvMs >= 58 &&
-                          currentDay.sleep.restingHeartRate <= 64
-                            ? "Parasympathetic rebound looks healthy—cleared for heavy compound intensity + 3L hydration."
-                            : "Elevated sympathetic tone suspected—prioritize morning sunlight, electrolytes, and a 20m Zone 2 walk."
-                        }`}
-                  </p>
-                </div>
-              </div>
-            </div>
+                )}
 
-            {/* Sleep Free-Text Note */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="sleep-note"
-                  className="block text-xs font-medium text-[var(--text-muted)]"
-                >
-                  Sleep Hygiene, Dreams &amp; Recovery Notes
-                </label>
-                <span className="text-[10px] text-[var(--text-muted)]">
-                  Auto-saved &amp; visible in History
-                </span>
-              </div>
-              <textarea
-                id="sleep-note"
-                placeholder="Type any notes on sleep quality, late meals, caffeine cutoff, room temp, or morning soreness..."
-                value={currentDay.sleep.note}
-                onChange={(e) =>
-                  updateCurrentDay((d) => ({
-                    ...d,
-                    sleep: { ...d.sleep, note: e.target.value },
-                  }))
-                }
-                onBlur={() => void flushSaveNow()}
-                className="auto-grow-textarea w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 text-xs sm:text-sm focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
-          </section>
-        )}
-
-        {/* =========================================================
-            ABOUT US: PITCH, CORE USP, CLINICAL RESEARCH & FAQS
-           ========================================================= */}
-        {(activeTab === "all" || activeTab === "research") && (
-          <section
-            aria-labelledby="heading-research"
-            className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 space-y-5"
-          >
-            <div className="flex items-center gap-2.5 border-b border-[var(--border-subtle)] pb-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-                <ShieldCheck className="h-5 w-5" aria-hidden="true" />
-              </div>
-              <div>
-                <h2
-                  id="heading-research"
-                  className="text-base font-bold sm:text-lg"
-                >
-                  About Us — Why PulseLoop &amp; Core Value Proposition
-                </h2>
-                <p className="text-xs text-[var(--text-muted)]">
-                  Hardware-free closed-loop fitness, nutrition &amp; sleep recovery built for Indian and global lifters
-                </p>
-              </div>
-            </div>
-
-            {/* Product Pitch & Core USP Cards */}
-            <div className="grid gap-3 md:grid-cols-3 text-xs">
-              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 space-y-1.5">
-                <div className="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">
-                  The Pitch
-                </div>
-                <div className="text-sm font-bold text-[var(--text-primary)]">
-                  One Connected Recovery Loop Instead of 3 Siloed Apps
-                </div>
-                <p className="text-[var(--text-muted)] leading-relaxed">
-                  Gym trackers ignore protein and sleep. Calorie apps ignore training load. PulseLoop connects Workouts, Nutrition, and Sleep in one mobile-first view so you know immediately whether your food and rest support tomorrow&apos;s performance.
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-1.5">
-                <div className="font-bold text-amber-400 uppercase tracking-wider text-[11px]">
-                  Our Core USP
-                </div>
-                <div className="text-sm font-bold text-[var(--text-primary)]">
-                  Global + Indian Nutrition &amp; 70 kg Physiological Calibration
-                </div>
-                <p className="text-[var(--text-muted)] leading-relaxed">
-                  No ₹25,000+ wearable lock-in. Search both USDA global foods and Indian kitchen staples with gram-weighted portions, auto-learn your top 5–10 recurring daily foods, carry over previous workout weights, and approximate Resting HR &amp; HRV from simple sleep hours and a 1–10 rating.
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3.5 space-y-1.5">
-                <div className="font-bold text-sky-400 uppercase tracking-wider text-[11px]">
-                  Core Value Addition
-                </div>
-                <div className="text-sm font-bold text-[var(--text-primary)]">
-                  Zero-Friction Custom URLs + Multi-Day Trends + Gemini 4 Coach
-                </div>
-                <p className="text-[var(--text-muted)] leading-relaxed">
-                  Skip sign-up walls: bookmark a personal URL like <code className="text-sky-400">/u/rahul</code>, inspect 7-day, 14-day, and 30-day trends across Workouts, Nutrition &amp; Sleep, save comments on every module, and run Gemini 4 AI coaching or natural-language logging in one tap.
-                </p>
-              </div>
-            </div>
-
-            {/* Industry Market Research & Clinical Best Practices Applied (Retained & Aligned with USP) */}
-            <div className="space-y-3 pt-1">
-              <div className="flex items-center gap-2">
-                <BookOpen className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                <h3 className="text-sm font-bold">
-                  Industry Market Research &amp; Clinical Best Practices Applied
-                </h3>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                  <div className="font-bold text-emerald-400">
-                    Strain-to-Sleep Sufficiency Modeling
+                {currentDay.aiCoach?.prescription && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-[var(--bg-elevated)] p-3 space-y-2 text-xs">
+                    <div className="font-bold text-emerald-400">
+                      {currentDay.aiCoach.prescription.headline}
+                    </div>
+                    <p className="text-[var(--text-muted)]">
+                      {currentDay.aiCoach.prescription.summary}
+                    </p>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {currentDay.aiCoach.prescription.recommendedMeal && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleApplyRecommendedMeal(
+                              currentDay.aiCoach!.prescription!.recommendedMeal!
+                            )
+                          }
+                          className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-bold text-amber-400"
+                        >
+                          + Log {currentDay.aiCoach.prescription.recommendedMeal.name}
+                        </button>
+                      )}
+                      {currentDay.aiCoach.prescription.recommendedExercise && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleApplyRecommendedExercise(
+                              currentDay.aiCoach!.prescription!.recommendedExercise!
+                            )
+                          }
+                          className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-bold text-sky-400"
+                        >
+                          + Add {currentDay.aiCoach.prescription.recommendedExercise.name}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied:</strong> Sleep is evaluated against training stress, not an arbitrary fixed number. Entering sleep duration (0–23 hrs) and 1–10 quality calibrates estimated Deep Sleep, REM, Resting HR (~62 bpm baseline), and HRV (~60 ms baseline) for a 70 kg Indian adult male and compares them with daily Gym Strain.
-                  </p>
-                </div>
+                )}
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                  <div className="font-bold text-amber-400">
-                    ICMR-NIN India &amp; USDA Global Nutrition Standards
-                  </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied:</strong> Open search combines ICMR-NIN Indian nutrition tables with USDA FoodData Central so home meals and gym staples use verified portion weights and automatically sum into Calories, Protein, Carbs, Fats, Hydration, and Fiber.
-                  </p>
-                </div>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <form onSubmit={handleSmartLogSubmit} className="space-y-2">
+                    <label
+                      htmlFor="smart-log-input"
+                      className="block text-xs font-bold text-sky-400"
+                    >
+                      Natural-Language Smart Logger
+                    </label>
+                    <textarea
+                      ref={smartLogTextareaRef}
+                      id="smart-log-input"
+                      value={smartLogInput}
+                      onChange={(e) => {
+                        setSmartLogInput(e.target.value);
+                        if (smartLogError) setSmartLogError("");
+                      }}
+                      onKeyDown={handleTextareaKeyDown}
+                      placeholder='e.g. "Did 4x8 Squats 82.5kg and drank a 30g whey shake (240 kcal)"'
+                      className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-sky-500 focus:outline-none"
+                    />
+                    {smartLogError && (
+                      <p role="alert" className="text-xs text-rose-400">
+                        {smartLogError}
+                      </p>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={geminiLoadingMode !== null}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-slate-950 disabled:opacity-60"
+                    >
+                      <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {geminiLoadingMode === "smart-log"
+                          ? "Parsing..."
+                          : "Smart Log"}
+                      </span>
+                    </button>
+                  </form>
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1.5">
-                  <div className="font-bold text-sky-400">
-                    Progressive Overload &amp; Frictionless Mobile Logging
-                  </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Best Practice Applied:</strong> Compact iPhone-friendly Exercise × Weight × Reps rows automatically pull forward your previous session&apos;s numbers so every workout starts where you left off—free of bloated charts or sluggish forms.
-                  </p>
+                  <form onSubmit={handleCoachSubmit} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label
+                        htmlFor="coach-chat-input"
+                        className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-400"
+                      >
+                        <Bot className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Stateful Gemini Coach</span>
+                      </label>
+                      {(currentDay.aiCoach?.messages?.length || 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleResetCoachThread}
+                          className="text-[11px] text-[var(--text-muted)] hover:text-emerald-400"
+                        >
+                          New Thread
+                        </button>
+                      )}
+                    </div>
+
+                    {(currentDay.aiCoach?.messages?.length || 0) > 0 && (
+                      <div className="max-h-36 overflow-y-auto space-y-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-xs">
+                        {currentDay.aiCoach!.messages.map((msg) => (
+                          <div
+                            key={msg.id}
+                            className={`rounded-lg px-2 py-1.5 ${
+                              msg.role === "user"
+                                ? "bg-emerald-500/10 border border-emerald-500/30"
+                                : "bg-[var(--bg-surface)]"
+                            }`}
+                          >
+                            <span className="font-bold">
+                              {msg.role === "user" ? "You: " : "Coach: "}
+                            </span>
+                            <span className="whitespace-pre-wrap">{msg.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <textarea
+                      ref={coachTextareaRef}
+                      id="coach-chat-input"
+                      value={coachInput}
+                      onChange={(e) => {
+                        setCoachInput(e.target.value);
+                        if (coachError) setCoachError("");
+                      }}
+                      onKeyDown={handleTextareaKeyDown}
+                      placeholder="Ask about recovery, protein gaps, or progression..."
+                      className="auto-grow-textarea rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs focus:border-emerald-500 focus:outline-none"
+                    />
+                    {coachError && (
+                      <p role="alert" className="text-xs text-rose-400">
+                        {coachError}
+                      </p>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={geminiLoadingMode !== null}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 disabled:opacity-60"
+                    >
+                      <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {geminiLoadingMode === "coach"
+                          ? "Thinking..."
+                          : "Ask Coach"}
+                      </span>
+                    </button>
+                  </form>
                 </div>
               </div>
-            </div>
+            )}
 
-            {/* Simple How-To & FAQs (With Real Custom URL Example) */}
-            <div className="space-y-3 pt-1">
-              <h3 className="text-sm font-bold text-emerald-400">
-                Quick Guide &amp; Frequently Asked Questions (FAQs)
-              </h3>
-              <div className="grid gap-2.5 md:grid-cols-2 text-xs">
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
-                  <div className="font-bold text-[var(--text-primary)]">
-                    Q1. How does &ldquo;Custom URL&rdquo; work? (Real Example)
+            {/* SUB-PAGE 4C: HISTORY & TRENDS + COLLAPSIBLE ABOUT US */}
+            {(desktopFullView || moreSubPage === "trends") && (
+              <div className="space-y-3">
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold">
+                      <History className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                      <span>History &amp; Trends</span>
+                    </span>
+                    <div className="inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-0.5 text-[11px]">
+                      {([7, 14, 30] as const).map((days) => (
+                        <button
+                          key={days}
+                          type="button"
+                          onClick={() => setHistoryWindowDays(days)}
+                          className={`rounded-md px-2.5 py-1 font-bold ${
+                            historyWindowDays === days
+                              ? "bg-emerald-500 text-slate-950"
+                              : "text-[var(--text-muted)]"
+                          }`}
+                        >
+                          {days}d
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    Click <strong>Custom URL</strong> in the top bar and type a name like <code className="text-emerald-400">rahul</code> to open <code className="text-emerald-400">/u/rahul</code>. Bookmark that link on your iPhone home screen—every workout, meal, sleep entry, and saved note stays in its own private workspace. Coaches can create <code className="text-emerald-400">/u/client-ananya</code> to share a separate tracker with a client with zero login friction.
-                  </p>
+
+                  {periodSummary.loggedDaysCount === 0 ? (
+                    <p className="text-xs text-[var(--text-muted)]">
+                      No logged days between {periodSummary.startDate} and{" "}
+                      {periodSummary.endDate} yet. Log workouts, food, or sleep
+                      to track multi-day averages and lift progression.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-2.5">
+                          <div className="text-[10px] text-sky-400 font-bold">
+                            Workouts ({historyWindowDays}d)
+                          </div>
+                          <div className="text-lg font-extrabold tabular-nums">
+                            {periodSummary.workoutDaysCount} sessions
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-2.5">
+                          <div className="text-[10px] text-amber-400 font-bold">
+                            Avg Fuel / Day
+                          </div>
+                          <div className="text-lg font-extrabold tabular-nums">
+                            {periodSummary.avgCalories} kcal
+                          </div>
+                          <div className="text-[10px] text-[var(--text-muted)]">
+                            {periodSummary.avgProtein}g Protein
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-2.5">
+                          <div className="text-[10px] text-indigo-400 font-bold">
+                            Avg Sleep
+                          </div>
+                          <div className="text-lg font-extrabold tabular-nums">
+                            {periodSummary.avgSleepHours}h
+                          </div>
+                          <div className="text-[10px] text-[var(--text-muted)]">
+                            {periodSummary.avgSleepQuality}/10 quality
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-2.5">
+                          <div className="text-[10px] text-emerald-400 font-bold">
+                            Avg Readiness
+                          </div>
+                          <div className="text-lg font-extrabold tabular-nums">
+                            {periodSummary.avgReadinessScore}%
+                          </div>
+                        </div>
+                      </div>
+
+                      {periodSummary.exerciseProgression.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-bold text-sky-400">
+                            Top Exercise Progression
+                          </div>
+                          <div className="grid gap-1.5 sm:grid-cols-2">
+                            {periodSummary.exerciseProgression
+                              .slice(0, 6)
+                              .map((ex) => (
+                                <div
+                                  key={ex.name}
+                                  className="flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs"
+                                >
+                                  <span className="font-semibold truncate">
+                                    {ex.name}
+                                  </span>
+                                  <span className="font-bold text-emerald-400 tabular-nums shrink-0">
+                                    {ex.latestWeight} {profile.weightUnit} ×{" "}
+                                    {ex.latestReps}
+                                  </span>
+                                </div>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-1.5">
+                        {periodSummary.dailyRows.slice(0, 7).map((row) => (
+                          <div
+                            key={row.date}
+                            className="flex items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-mono font-bold text-emerald-400">
+                                {row.date}
+                              </span>{" "}
+                              <span className="text-[var(--text-muted)]">
+                                · {row.readinessScore}% · {row.totalSets} sets ·{" "}
+                                {row.calories} kcal · {row.sleepHours}h
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedDate(row.date);
+                                setActiveScreen("home");
+                                setHomeSubPage("summary");
+                              }}
+                              className="shrink-0 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-bold text-emerald-400"
+                            >
+                              Open
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
-                  <div className="font-bold text-[var(--text-primary)]">
-                    Q2. Why does a new day start empty, and how do my Food Staples work?
+                {/* Collapsible About Us & Industry Market Research */}
+                <details className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-3">
+                  <summary className="flex items-center justify-between gap-2 cursor-pointer list-none text-xs font-bold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <BookOpen className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                      <span>
+                        About Us · Industry Market Research &amp; Clinical Best Practices Applied
+                      </span>
+                    </span>
+                    <ChevronDown className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
+                  </summary>
+                  <div className="mt-3 grid gap-2.5 sm:grid-cols-3 text-xs text-[var(--text-muted)] leading-relaxed">
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1">
+                      <div className="font-bold text-emerald-400">
+                        Strain-to-Sleep Sufficiency
+                      </div>
+                      <p>
+                        Connects WHOOP-style muscular strain (0–21) to required sleep hours, deep sleep repair, and 70 kg physiological HRV/RHR calibration without requiring expensive hardware.
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1">
+                      <div className="font-bold text-amber-400">
+                        ICMR-NIN India &amp; USDA Global
+                      </div>
+                      <p>
+                        Verified Indian kitchen staples and global foods with gram-weighted portions, auto-learned 1-tap Favs, and instant macro totals.
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1">
+                      <div className="font-bold text-sky-400">
+                        Hardened Private Capability URLs
+                      </div>
+                      <p>
+                        Zero-password onboarding with 50-bit cryptographic workspace URLs, cloud auto-save, and instant multi-day History &amp; Trends.
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    Nothing is fake or pre-filled so your calorie and strain numbers reflect real intake only. As you log foods across days (or click the Pin icon next to a search result), your top 5–10 recurring meals automatically populate under <strong>Your Frequently Eaten Staples</strong> for 1-tap logging with adjustable quantity.
-                  </p>
-                </div>
-
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
-                  <div className="font-bold text-[var(--text-primary)]">
-                    Q3. How are Gym Strain (/21) and Readiness (%) scored?
-                  </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    <strong>Gym Strain (0–21)</strong> rises logarithmically with gym duration, completed sets/reps, and cardio minutes (so going from 0 to 12 sets moves fast, while marathon sessions taper near 21). <strong>Readiness (12–99%)</strong> blends Sleep Duration &amp; Deep Sleep ratio against strain-adjusted need, protein &amp; calorie fueling coverage, and subjective sleep quality.
-                  </p>
-                </div>
-
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 space-y-1">
-                  <div className="font-bold text-[var(--text-primary)]">
-                    Q4. How do I view multi-week progress &amp; carry over previous weights?
-                  </div>
-                  <p className="text-[var(--text-muted)] leading-relaxed">
-                    Open the <strong>History &amp; Trends</strong> tab to switch between 7-Day (Week), 14-Day (2 Weeks), and 30-Day (Month) consolidated totals, lift progression, and all saved notes. Inside <strong>1. Workouts</strong>, tap <strong>Load Prev</strong> or add an exercise by name to automatically pre-fill your last logged weights and reps.
-                  </p>
-                </div>
+                </details>
               </div>
-            </div>
+            )}
           </section>
         )}
       </main>
 
       {/* =========================================================
-          CONVERSATIONAL SLIDE-OVER MORNING CHECK-IN DRAWER (Sleep + Optional Body Metrics)
+          STICKY THUMB-FRIENDLY 4-TAB BOTTOM NAVIGATION BAR
          ========================================================= */}
-      <dialog
-        ref={morningDrawerRef}
-        aria-labelledby="morning-checkin-title"
-        onCancel={(e) => {
-          e.preventDefault();
-          setShowMorningDrawer(false);
-        }}
-        onClose={() => setShowMorningDrawer(false)}
-        onClick={(e) => {
-          const dlg = morningDrawerRef.current;
-          if (!dlg) return;
-          const rect = dlg.getBoundingClientRect();
-          if (
-            e.clientX < rect.left ||
-            e.clientX > rect.right ||
-            e.clientY < rect.top ||
-            e.clientY > rect.bottom
-          ) {
-            setShowMorningDrawer(false);
-          }
-        }}
-        className="morning-drawer-dialog shadow-2xl"
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-5 py-4 bg-[var(--bg-elevated)]/70">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
-              <Moon className="h-5 w-5" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <h2 id="morning-checkin-title" className="text-base font-bold">
-                Morning Check-In · {selectedDate}
-              </h2>
-              <p className="text-xs text-[var(--text-muted)]">
-                Quick check-in: enter last night&apos;s sleep to finish for the morning.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowMorningDrawer(false)}
-            aria-label="Close Morning Check-In Drawer"
-            className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] transition"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          {/* Primary Check-In: Sleep (2 Inputs Only) */}
-          <div className="rounded-2xl border border-indigo-500/35 bg-indigo-500/5 p-4 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
-                1. How did you sleep? (Primary · 2 Inputs)
-              </span>
-              <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
-                Completes Check-In
-              </span>
-            </div>
-
-            <div className="space-y-2">
-              <label
-                htmlFor="drawer-sleep-hours"
-                className="block text-xs font-semibold text-[var(--text-primary)]"
-              >
-                Total Sleep Duration (hours)
-              </label>
-              <div className="flex items-baseline gap-2">
-                <DecimalInput
-                  id="drawer-sleep-hours"
-                  autoFocus
-                  allowDecimal
-                  min={0}
-                  max={23}
-                  value={currentDay.sleep.totalHours}
-                  onValueChange={(nextHours) =>
-                    updateSleepWith70kgIndianBaseline(
-                      nextHours,
-                      currentDay.sleep.sleepQuality
-                    )
-                  }
-                  className="w-24 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 text-2xl font-extrabold tabular-nums text-indigo-400 focus:border-indigo-400 focus:outline-none"
-                />
-                <span className="text-xs text-[var(--text-muted)]">hours</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {[5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9].map((hrs) => (
-                  <button
-                    key={hrs}
-                    type="button"
-                    aria-pressed={currentDay.sleep.totalHours === hrs}
-                    onClick={() =>
-                      updateSleepWith70kgIndianBaseline(
-                        hrs,
-                        currentDay.sleep.sleepQuality
-                      )
-                    }
-                    className={`rounded-full px-2.5 py-1 text-xs font-semibold transition ${
-                      currentDay.sleep.totalHours === hrs
-                        ? "bg-indigo-500 text-slate-950"
-                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-indigo-400/50"
-                    }`}
-                  >
-                    {hrs}h
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="drawer-sleep-quality"
-                  className="text-xs font-semibold text-[var(--text-primary)]"
-                >
-                  Sleep Score / Quality Rating (1–10)
-                </label>
-                <span className="text-xs font-bold text-amber-400">
-                  {currentDay.sleep.sleepQuality} / 10
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    aria-label={`Drawer sleep quality ${q} out of 10`}
-                    aria-pressed={currentDay.sleep.sleepQuality === q}
-                    onClick={() =>
-                      updateSleepWith70kgIndianBaseline(
-                        currentDay.sleep.totalHours,
-                        q
-                      )
-                    }
-                    className={`min-w-[30px] rounded-lg px-2 py-1.5 text-xs font-bold transition ${
-                      currentDay.sleep.sleepQuality === q
-                        ? "bg-amber-500 text-slate-950"
-                        : "border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:border-amber-400/50"
-                    }`}
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Live Auto-Derived Biometrics Preview */}
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs space-y-1.5">
-              <div className="text-[11px] font-semibold text-indigo-400">
-                Auto-Calculated Sleep Architecture &amp; Recovery Metrics
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-center">
-                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
-                  <div className="text-[10px] text-[var(--text-muted)]">Deep</div>
-                  <div className="font-bold text-emerald-400">
-                    {currentDay.sleep.deepSleepHours}h
-                  </div>
-                </div>
-                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
-                  <div className="text-[10px] text-[var(--text-muted)]">REM</div>
-                  <div className="font-bold text-sky-400">
-                    {currentDay.sleep.remSleepHours}h
-                  </div>
-                </div>
-                <div className="rounded-lg bg-[var(--bg-elevated)] p-1.5">
-                  <div className="text-[10px] text-[var(--text-muted)]">RHR / HRV</div>
-                  <div className="font-bold text-teal-400">
-                    {currentDay.sleep.restingHeartRate || "--"} / {currentDay.sleep.hrvMs || "--"}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Secondary Check-In: Optional Body Composition (Weight & Body Fat %) */}
-          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                2. Body Parameters (Optional)
-              </span>
-              <span className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
-                Skip if unchanged today
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 space-y-1">
-                <label
-                  htmlFor="drawer-body-weight"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Body Weight ({profile.weightUnit})
-                </label>
-                <div className="flex items-baseline gap-1">
-                  <DecimalInput
-                    id="drawer-body-weight"
-                    allowDecimal
-                    min={0}
-                    max={400}
-                    value={currentDay.bodyMetrics?.weight ?? 0}
-                    onValueChange={(val) => {
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        bodyMetrics: {
-                          ...d.bodyMetrics,
-                          weight: val > 0 ? val : undefined,
-                          updatedAt: new Date().toISOString(),
-                        },
-                      }));
-                      if (val > 0) {
-                        updateProfileMeta((p) => ({ ...p, bodyweight: val }));
-                      }
-                    }}
-                    className="w-20 bg-transparent text-lg font-extrabold text-emerald-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">
-                    {profile.weightUnit}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateCurrentDay((d) => ({
-                      ...d,
-                      bodyMetrics: {
-                        ...d.bodyMetrics,
-                        weight: profile.bodyweight,
-                        updatedAt: new Date().toISOString(),
-                      },
-                    }))
-                  }
-                  className="text-[10px] font-medium text-emerald-400 hover:underline"
-                >
-                  Use {profile.bodyweight} {profile.weightUnit}
-                </button>
-              </div>
-
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 space-y-1">
-                <label
-                  htmlFor="drawer-body-fat"
-                  className="block text-[11px] font-medium text-[var(--text-muted)]"
-                >
-                  Body Fat %
-                </label>
-                <div className="flex items-baseline gap-1">
-                  <DecimalInput
-                    id="drawer-body-fat"
-                    allowDecimal
-                    min={0}
-                    max={60}
-                    value={currentDay.bodyMetrics?.bodyFatPct ?? 0}
-                    onValueChange={(val) => {
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        bodyMetrics: {
-                          ...d.bodyMetrics,
-                          bodyFatPct: val > 0 ? val : undefined,
-                          updatedAt: new Date().toISOString(),
-                        },
-                      }));
-                      if (val > 0) {
-                        updateProfileMeta((p) => ({ ...p, bodyFatPct: val }));
-                      }
-                    }}
-                    className="w-20 bg-transparent text-lg font-extrabold text-sky-400 focus:outline-none"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">%</span>
-                </div>
-                {profile.bodyFatPct ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateCurrentDay((d) => ({
-                        ...d,
-                        bodyMetrics: {
-                          ...d.bodyMetrics,
-                          bodyFatPct: profile.bodyFatPct,
-                          updatedAt: new Date().toISOString(),
-                        },
-                      }))
-                    }
-                    className="text-[10px] font-medium text-sky-400 hover:underline"
-                  >
-                    Use {profile.bodyFatPct}%
-                  </button>
-                ) : (
-                  <span className="block text-[10px] text-[var(--text-muted)]">
-                    Every few days
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
-            Nutrition, workouts, and evening habits can all be logged anytime later in the day. Completing sleep here finishes your Morning Check-In.
-          </p>
-        </div>
-
-        <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-4 flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              updateCurrentDay((d) => ({
-                ...d,
-                checkIn: { ...d.checkIn, sleepSkipped: true },
-              }));
-              setShowMorningDrawer(false);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] transition"
-          >
-            <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Skip Sleep for Now</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              if (currentDay.sleep.totalHours <= 0) {
-                document.getElementById("drawer-sleep-hours")?.focus();
-                return;
-              }
-              updateCurrentDay((d) => ({
-                ...d,
-                checkIn: {
-                  ...d.checkIn,
-                  sleepSkipped: false,
-                  morningCompletedAt: new Date().toISOString(),
+      {!desktopFullView && (
+        <nav
+          aria-label="Primary Mobile Navigation"
+          className="mobile-bottom-nav fixed bottom-0 inset-x-0 z-30 border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]/95 backdrop-blur-md"
+        >
+          <div className="mx-auto max-w-4xl grid grid-cols-4 gap-1 px-2 pt-1.5">
+            {(
+              [
+                {
+                  id: "home",
+                  label: "1. Home",
+                  Icon: Home,
+                  activeClass:
+                    "border-indigo-500/45 bg-indigo-500/15 text-indigo-400",
                 },
-              }));
-              setShowMorningDrawer(false);
-              void flushSaveNow();
-            }}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
-          >
-            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-            <span>Complete Check-In</span>
-          </button>
-        </div>
-      </dialog>
+                {
+                  id: "workouts",
+                  label: "2. Workouts",
+                  Icon: Dumbbell,
+                  activeClass: "border-sky-500/45 bg-sky-500/15 text-sky-400",
+                },
+                {
+                  id: "nutrition",
+                  label: "3. Nutrition",
+                  Icon: Apple,
+                  activeClass:
+                    "border-amber-500/45 bg-amber-500/15 text-amber-400",
+                },
+                {
+                  id: "more",
+                  label: "4. Habits & AI",
+                  Icon: ListChecks,
+                  activeClass:
+                    "border-purple-500/45 bg-purple-500/15 text-purple-400",
+                },
+              ] as const
+            ).map(({ id, label, Icon, activeClass }) => {
+              const isActive = activeScreen === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  aria-current={isActive ? "page" : undefined}
+                  onClick={() => setActiveScreen(id)}
+                  className={`flex flex-col items-center justify-center gap-0.5 rounded-xl border py-1.5 text-[11px] font-bold transition ${
+                    isActive
+                      ? activeClass
+                      : "border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <Icon className="h-4 w-4" aria-hidden="true" />
+                  <span className="truncate">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
 
       {/* =========================================================
           WHOOP-STYLE 100-HABIT CATALOG & CUSTOM TRACKER PICKER DIALOG
@@ -6200,38 +5728,36 @@ export default function FitnessDashboard({
         }}
         className="habit-catalog-dialog shadow-2xl"
       >
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-5 py-4 bg-[var(--bg-elevated)]/70">
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3.5 bg-[var(--bg-elevated)]/70">
           <div>
-            <h2 id="habit-catalog-title" className="text-base font-bold">
-              Customize Daily Habits Journal ({allHabitDefinitions.length} Available)
+            <h2 id="habit-catalog-title" className="text-sm sm:text-base font-bold">
+              Customize Daily Journal ({allHabitDefinitions.length} Available)
             </h2>
             <p className="text-xs text-[var(--text-muted)]">
-              Select which habits appear in your daily checklist ({activeHabits.length} currently active).
+              Pick habits for your daily journal ({activeHabits.length} active).
             </p>
           </div>
           <button
             type="button"
             onClick={() => setShowHabitCatalogDialog(false)}
             aria-label="Close Habits Catalog"
-            className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]"
+            className="rounded-lg p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
 
-        <div className="p-4 border-b border-[var(--border-subtle)] space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex flex-1 min-w-[200px] items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5">
-              <Search className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
-              <input
-                type="search"
-                aria-label="Search 100 habits catalog"
-                value={habitSearchQuery}
-                onChange={(e) => setHabitSearchQuery(e.target.value)}
-                placeholder="Search creatine, magnesium, sauna, steps, alcohol..."
-                className="w-full bg-transparent text-xs focus:outline-none"
-              />
-            </div>
+        <div className="p-3.5 border-b border-[var(--border-subtle)] space-y-2.5">
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5">
+            <Search className="h-4 w-4 text-[var(--text-muted)]" aria-hidden="true" />
+            <input
+              type="search"
+              aria-label="Search 100 habits catalog"
+              value={habitSearchQuery}
+              onChange={(e) => setHabitSearchQuery(e.target.value)}
+              placeholder="Search creatine, magnesium, sauna, alcohol..."
+              className="w-full bg-transparent text-xs focus:outline-none"
+            />
           </div>
 
           <div className="flex flex-wrap gap-1.5">
@@ -6249,7 +5775,7 @@ export default function FitnessDashboard({
                 key={cat}
                 type="button"
                 onClick={() => setHabitCategoryFilter(cat)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition ${
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
                   habitCategoryFilter === cat
                     ? "bg-purple-500 text-slate-950"
                     : "border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]"
@@ -6260,17 +5786,16 @@ export default function FitnessDashboard({
             ))}
           </div>
 
-          {/* Add Custom Habit Inline Form */}
           <form
             onSubmit={handleAddCustomHabit}
-            className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2.5 text-xs"
+            className="flex flex-wrap items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 text-xs"
           >
             <input
               type="text"
               value={customHabitName}
               onChange={(e) => setCustomHabitName(e.target.value)}
-              placeholder="Add custom habit (e.g. Fish Oil, Sunlight)..."
-              className="flex-1 min-w-[160px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
+              placeholder="Add custom habit..."
+              className="flex-1 min-w-[130px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
             />
             <select
               aria-label="Custom Habit Category"
@@ -6295,7 +5820,7 @@ export default function FitnessDashboard({
               className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
             >
               <option value="yes_no">Yes / No</option>
-              <option value="dosage">Dosage / Units</option>
+              <option value="dosage">Dosage</option>
             </select>
             {customHabitType === "dosage" && (
               <>
@@ -6304,30 +5829,29 @@ export default function FitnessDashboard({
                   aria-label="Custom Habit Unit"
                   value={customHabitUnit}
                   onChange={(e) => setCustomHabitUnit(e.target.value)}
-                  placeholder="unit (g/mg)"
-                  className="w-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                  placeholder="unit"
+                  className="w-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
                 />
                 <input
                   type="text"
                   aria-label="Custom Habit Default Amount"
                   value={customHabitDefault}
                   onChange={(e) => setCustomHabitDefault(e.target.value)}
-                  placeholder="default"
-                  className="w-16 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                  placeholder="5"
+                  className="w-12 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
                 />
               </>
             )}
             <button
               type="submit"
-              className="inline-flex items-center gap-1 rounded-lg bg-purple-500 px-3 py-1 font-semibold text-slate-950 hover:bg-purple-400 transition"
+              className="rounded-lg bg-purple-500 px-2.5 py-1 font-bold text-slate-950"
             >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Add Custom</span>
+              + Add
             </button>
           </form>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 grid gap-2 sm:grid-cols-2">
+        <div className="flex-1 overflow-y-auto p-3.5 grid gap-2 sm:grid-cols-2">
           {allHabitDefinitions
             .filter((h) => {
               if (
@@ -6357,7 +5881,7 @@ export default function FitnessDashboard({
                   className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 text-left text-xs transition ${
                     isSelected
                       ? "border-purple-500/50 bg-purple-500/10"
-                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-purple-500/35"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                   }`}
                 >
                   <div className="min-w-0">
@@ -6383,13 +5907,13 @@ export default function FitnessDashboard({
             })}
         </div>
 
-        <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 px-5 py-3 flex justify-end">
+        <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 px-4 py-3 flex justify-end">
           <button
             type="button"
             onClick={() => setShowHabitCatalogDialog(false)}
-            className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
+            className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950"
           >
-            Done ({activeHabits.length} Active Habits)
+            Done ({activeHabits.length} Active)
           </button>
         </div>
       </dialog>

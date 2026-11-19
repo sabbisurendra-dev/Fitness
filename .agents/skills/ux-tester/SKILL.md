@@ -113,3 +113,13 @@ Verify across all three canonical viewport widths (`360px` Mobile, `768px` Table
   - **Check**: Log a `Yes / No / Blank` habit (e.g., `Morning Sunlight`) and a `Dosage` habit (`Creatine Monohydrate` `5 g` quick chip), open `Choose Habits (100+ Catalog)`, filter/search, toggle active habits, and add a custom habit.
   - **Pass**: At least 100 catalog habits are searchable across 5 categories; active habits persist per profile; individual habits can be left blank or cleared without affecting other days.
   - **Fail**: Catalog shows fewer than 100 habits, blank habits coerce to `"no"`/`"0"`, or dialog overflows at `360px`.
+
+- **UX-CUSTOM-05 (Stage 1 Onboarding Gateway, Auto-Redirect & Link Safety)**:
+  - **Check**: Visit `/` on a fresh browser session (verify Welcome Screen + 4 random guest chips + `Refresh` button + zero horizontal overflow at `360px`/`768px`/`1280px`), click `Launch My Private Space →`, verify URL changes to `/u/<prefix>-<10-char-token>`, log an entry and confirm the dismissible "Save Your Private Link" nudge appears, revisit `/` (verify auto-redirect back to `/u/<slug>`), visit `/?new=1` (verify Welcome Screen + Resume Existing Space list without redirect loop), visit `/u/nonexistent-slug-xyz` (verify "Private Space Not Found" with zero console/network errors), and verify `My Private Link` vs `Invite a Friend` copy distinct URLs.
+  - **Pass**: Every onboarding, redirect, not-found, and privacy link flow works cleanly in both Dark and Light modes with zero horizontal scroll or console errors.
+  - **Fail**: `/` collides on `/u/main`, `/?new=1` traps the user in a redirect loop, typo slugs silently open a blank profile, or `Invite a Friend` leaks the user's private edit URL.
+
+- **UX-CUSTOM-06 (Mobile Screen-by-Screen v2 Layout, Home Check-In & WHOOP 5.0 Flows)**:
+  - **Check**: Verify bottom 4-tab bar (`1. Home`, `2. Workouts`, `3. Nutrition`, `4. Habits & AI`), `1–10` Sleep Score 2×5 grid, empty Weight/Body Fat inputs with days-since-logged nudge, WHOOP 5.0 Live Workout dual stopwatch (`01:04` + `REST 00:45`) & Compact Accordion exercise rows with `W/1/2/F` badges, 2-page Nutrition (`1. Favs` + collapsible `Logged Today` | `2. Food Search`), and WHOOP 5.0 Journal (`Same as Yesterday` + `NO|YES` + conditional dosage/time).
+  - **Pass**: Each sub-page fits compactly on mobile without 3–4 page vertical scrolling, live stopwatch ticks on the same Workout screen (and shows mini-bar cross-tab), and optional Desktop `Full View` toggle works cleanly.
+  - **Fail**: Any tab still reads `"Pulse"`, Sleep Score omits numbers, Weight pre-fills old values as today's input, or `3. Meals` tab remains.

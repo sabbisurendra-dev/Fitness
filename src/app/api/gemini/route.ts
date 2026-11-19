@@ -11,8 +11,15 @@ import {
   FoodDatabaseItem,
   searchFoodsCatalog,
 } from "@/lib/nutritionDatabase";
+import {
+  checkSlidingWindowRateLimit,
+  getClientIp,
+} from "@/lib/workspaceStore";
 
 export const dynamic = "force-dynamic";
+
+const GEMINI_HOURLY_LIMIT = 25;
+const ONE_HOUR_MS = 60 * 60 * 1000;
 
 const ALLOWED_MODELS = [
   "gemini-4-hydrogen",
@@ -433,12 +440,18 @@ export async function POST(req: NextRequest) {
           })
         : "";
 
-    const buildFallbackResponse = () => {
+    const buildFallbackResponse = (reason?: "rate-limited" | "offline") => {
+      const rateNote =
+        reason === "rate-limited"
+          ? "Live Gemini quota reached for this hour — switched seamlessly to instant local engine."
+          : undefined;
       if (mode === "food-search") {
         return NextResponse.json({
           ok: true,
           mode,
           source: "local-fallback",
+          rateLimited: reason === "rate-limited",
+          statusNote: rateNote,
           model,
           interactionId: `offline_fallback_${Date.now()}`,
           food: buildFallbackFoodSearch(prompt),
@@ -449,6 +462,8 @@ export async function POST(req: NextRequest) {
           ok: true,
           mode,
           source: "local-fallback",
+          rateLimited: reason === "rate-limited",
+          statusNote: rateNote,
           model,
           interactionId: `offline_fallback_${Date.now()}`,
           prescription: buildFallbackPrescription(entry, profile, analysis, model),
@@ -459,6 +474,8 @@ export async function POST(req: NextRequest) {
           ok: true,
           mode,
           source: "local-fallback",
+          rateLimited: reason === "rate-limited",
+          statusNote: rateNote,
           model,
           interactionId: `offline_fallback_${Date.now()}`,
           parsed: buildFallbackSmartLog(prompt, profile),
@@ -468,17 +485,35 @@ export async function POST(req: NextRequest) {
         ok: true,
         mode,
         source: "local-fallback",
+        rateLimited: reason === "rate-limited",
+        statusNote: rateNote,
         model,
         interactionId: `offline_fallback_${Date.now()}`,
         reply: analysis
-          ? `Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`
+          ? `${rateNote ? `${rateNote}\n\n` : ""}Offline coach summary for /u/${slug} (${date}): Readiness is ${analysis.readinessScore}% against Strain ${analysis.strainScore}/21. ${analysis.verdictExplanation}`
           : "Offline coach summary unavailable without telemetry payload.",
       });
     };
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return buildFallbackResponse();
+      return buildFallbackResponse("offline");
+    }
+
+    // Per-IP + per-slug sliding-window rate limit (25 live Gemini calls/hour)
+    const clientIp = getClientIp(req);
+    const ipRate = checkSlidingWindowRateLimit(
+      `gemini-ip:${clientIp}`,
+      GEMINI_HOURLY_LIMIT,
+      ONE_HOUR_MS
+    );
+    const slugRate = checkSlidingWindowRateLimit(
+      `gemini-slug:${slug}`,
+      GEMINI_HOURLY_LIMIT,
+      ONE_HOUR_MS
+    );
+    if (!ipRate.allowed || !slugRate.allowed) {
+      return buildFallbackResponse("rate-limited");
     }
 
     const client = new GoogleGenAI({ apiKey });

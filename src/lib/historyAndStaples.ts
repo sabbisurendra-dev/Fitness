@@ -652,3 +652,73 @@ export function computeUserFrequentStaples(
     })
     .slice(0, limit);
 }
+
+export function findLastBodyMetricEntry(
+  profile: UserProfileStore,
+  beforeDate: string,
+  field: "weight" | "bodyFatPct"
+): { value: number; date: string; daysAgo: number } | null {
+  const prevDates = Object.keys(profile.days)
+    .filter((d) => d < beforeDate)
+    .sort((a, b) => b.localeCompare(a));
+
+  const targetMs = Date.parse(`${beforeDate}T12:00:00Z`);
+  for (const d of prevDates) {
+    const val = Number(profile.days[d]?.bodyMetrics?.[field]);
+    if (Number.isFinite(val) && val > 0) {
+      const prevMs = Date.parse(`${d}T12:00:00Z`);
+      const daysAgo = Math.max(1, Math.round((targetMs - prevMs) / 86400000));
+      return { value: val, date: d, daysAgo };
+    }
+  }
+  return null;
+}
+
+export function computeHabitRecoveryImpact(
+  profile: UserProfileStore,
+  habitId: string
+): {
+  yesCount: number;
+  noCount: number;
+  deltaPct: number | null;
+  logsNeeded: number;
+} {
+  let yesCount = 0;
+  let yesSum = 0;
+  let noCount = 0;
+  let noSum = 0;
+
+  for (const date of Object.keys(profile.days)) {
+    const entry = profile.days[date];
+    if (!entry || entry.sleep.totalHours <= 0) continue;
+    const log = entry.habitLogs?.[habitId];
+    if (!log) continue;
+    const isYes =
+      log.status === "yes" ||
+      (log.status !== "no" &&
+        typeof log.value === "string" &&
+        log.value.trim().length > 0);
+    const isNo = log.status === "no";
+    if (!isYes && !isNo) continue;
+    const { readinessScore } = calculateSufficiencyAnalysis(entry, profile);
+    if (isYes) {
+      yesCount += 1;
+      yesSum += readinessScore;
+    } else if (isNo) {
+      noCount += 1;
+      noSum += readinessScore;
+    }
+  }
+
+  if (yesCount >= 5 && noCount >= 5) {
+    const deltaPct = Math.round(yesSum / yesCount - noSum / noCount);
+    return { yesCount, noCount, deltaPct, logsNeeded: 0 };
+  }
+
+  return {
+    yesCount,
+    noCount,
+    deltaPct: null,
+    logsNeeded: Math.max(0, 5 - yesCount) + Math.max(0, 5 - noCount),
+  };
+}

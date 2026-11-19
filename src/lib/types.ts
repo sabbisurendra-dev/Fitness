@@ -1,10 +1,13 @@
 export type ExerciseType = "strength" | "bodyweight" | "cardio";
 
+export type WorkoutSetType = "W" | "1" | "2" | "F";
+
 export interface ExerciseSet {
   id: string;
   weight: number;
   reps: number;
   rpe?: number;
+  setType?: WorkoutSetType;
   completed: boolean;
 }
 
@@ -44,6 +47,8 @@ export interface WorkoutSession {
   routineId?: string;
   startedAt?: string | null;
   endedAt?: string | null;
+  inSetActive?: boolean;
+  restStartedAt?: string | null;
   workoutRating?: number; // 1-10 post-workout user rating
   skipped?: boolean;
   exercises: WorkoutExercise[];
@@ -172,6 +177,7 @@ export interface DailyHabitEntry {
   status?: "yes" | "no" | "blank";
   value?: string;
   unit?: string;
+  time?: string;
   updatedAt?: string;
 }
 
@@ -221,6 +227,12 @@ export interface PinnedFoodStaple {
 export interface UserProfileStore {
   slug: string;
   displayName: string;
+  workspaceId?: string;
+  authMode?: "url-only" | "claimed";
+  ownerUserId?: string;
+  isGuest?: boolean;
+  createdAt?: string;
+  lastActiveAt?: string;
   weightUnit: "kg" | "lbs";
   bodyweight: number;
   bodyFatPct?: number;
