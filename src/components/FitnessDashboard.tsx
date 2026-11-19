@@ -221,6 +221,20 @@ function formatMMSS(sec: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function isPointerOutsideDialog(
+  e: React.PointerEvent<HTMLDialogElement>,
+  dlg: HTMLDialogElement | null
+): boolean {
+  if (!dlg) return false;
+  const rect = dlg.getBoundingClientRect();
+  return (
+    e.clientX < rect.left ||
+    e.clientX > rect.right ||
+    e.clientY < rect.top ||
+    e.clientY > rect.bottom
+  );
+}
+
 export default function FitnessDashboard({
   initialSlug = "main",
 }: FitnessDashboardProps) {
@@ -247,6 +261,7 @@ export default function FitnessDashboard({
 
   // Header Workspace, Backup & Sharing Dialog
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
+  const [clientOrigin, setClientOrigin] = useState("");
   const [savedSpaces, setSavedSpaces] = useState<SavedSpaceRecord[]>([]);
   const [existingSpaceInput, setExistingSpaceInput] = useState("");
   const [existingSpaceError, setExistingSpaceError] = useState("");
@@ -322,6 +337,7 @@ export default function FitnessDashboard({
   const workspaceMenuDialogRef = useRef<HTMLDialogElement | null>(null);
   const workspacePressedOutsideRef = useRef(false);
   const habitCatalogDialogRef = useRef<HTMLDialogElement | null>(null);
+  const habitPressedOutsideRef = useRef(false);
   const smartLogTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const coachTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -377,6 +393,11 @@ export default function FitnessDashboard({
     },
     [announceCopyStatus]
   );
+
+  // Capture client origin after hydration so SSR and first client render match identically
+  useEffect(() => {
+    setClientOrigin(window.location.origin);
+  }, []);
 
   // Sync theme override with <meta name="color-scheme">
   useEffect(() => {
@@ -704,14 +725,10 @@ export default function FitnessDashboard({
 
   // Private Link, Invite a Friend, WhatsApp & Backup handlers
   const getPrivateUrl = () =>
-    typeof window !== "undefined"
-      ? `${window.location.origin}/u/${slug}`
-      : `/u/${slug}`;
+    clientOrigin ? `${clientOrigin}/u/${slug}` : `/u/${slug}`;
 
   const getMasterInviteUrl = () =>
-    typeof window !== "undefined"
-      ? window.location.origin
-      : process.env.NEXT_PUBLIC_APP_URL || "";
+    clientOrigin || process.env.NEXT_PUBLIC_APP_URL || "";
 
   const handleCopyPrivateLink = async () => {
     const ok = await copyTextToClipboard(
@@ -1650,7 +1667,7 @@ export default function FitnessDashboard({
       }));
       setGeminiStatusMessage(
         data.statusNote ||
-          `AI Coach (${getAiTierLabel(data.model || geminiModel)}) generated prescription: ${prescription.headline}`
+          `AI Coach (${getAiTierLabel(data.model || geminiModel)}) updated your recovery prescription.`
       );
     } catch (err) {
       setGeminiStatusMessage(
@@ -4807,7 +4824,6 @@ export default function FitnessDashboard({
                       type="button"
                       onClick={() => {
                         handleAddFoodFromSearch();
-                        setNutritionSubPage("favs");
                       }}
                       className="w-full rounded-xl bg-emerald-500 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
                     >
@@ -4820,9 +4836,16 @@ export default function FitnessDashboard({
                   <div
                     role="status"
                     aria-live="polite"
-                    className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-400"
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-400"
                   >
-                    {foodSearchMessage}
+                    <span>{foodSearchMessage}</span>
+                    <button
+                      type="button"
+                      onClick={() => setNutritionSubPage("favs")}
+                      className="shrink-0 font-bold underline hover:text-emerald-300"
+                    >
+                      View Logged ({currentDay.nutrition.meals.length}) &rarr;
+                    </button>
                   </div>
                 )}
               </div>
@@ -5503,23 +5526,30 @@ export default function FitnessDashboard({
       <dialog
         ref={habitCatalogDialogRef}
         aria-labelledby="habit-catalog-title"
-        onCancel={(e) => {
-          e.preventDefault();
+        {...({ closedby: "any" } as Record<string, string>)}
+        onClose={() => {
+          if (habitCatalogDialogRef.current) {
+            habitCatalogDialogRef.current.returnValue = "";
+          }
           setShowHabitCatalogDialog(false);
         }}
-        onClose={() => setShowHabitCatalogDialog(false)}
-        onClick={(e) => {
-          const dlg = habitCatalogDialogRef.current;
-          if (!dlg) return;
-          const rect = dlg.getBoundingClientRect();
+        onPointerDown={(e) => {
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            habitPressedOutsideRef.current = isPointerOutsideDialog(
+              e,
+              habitCatalogDialogRef.current
+            );
+          }
+        }}
+        onPointerUp={(e) => {
           if (
-            e.clientX < rect.left ||
-            e.clientX > rect.right ||
-            e.clientY < rect.top ||
-            e.clientY > rect.bottom
+            !("closedBy" in HTMLDialogElement.prototype) &&
+            habitPressedOutsideRef.current &&
+            isPointerOutsideDialog(e, habitCatalogDialogRef.current)
           ) {
             setShowHabitCatalogDialog(false);
           }
+          habitPressedOutsideRef.current = false;
         }}
         className="habit-catalog-dialog shadow-2xl"
       >
@@ -5720,10 +5750,6 @@ export default function FitnessDashboard({
         ref={workspaceMenuDialogRef}
         aria-labelledby="workspace-menu-title"
         {...({ closedby: "any" } as Record<string, string>)}
-        onCancel={(e) => {
-          e.preventDefault();
-          setShowWorkspaceMenu(false);
-        }}
         onClose={() => {
           if (workspaceMenuDialogRef.current) {
             workspaceMenuDialogRef.current.returnValue = "";
@@ -5732,31 +5758,19 @@ export default function FitnessDashboard({
         }}
         onPointerDown={(e) => {
           if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const dlg = workspaceMenuDialogRef.current;
-            if (!dlg) return;
-            const rect = dlg.getBoundingClientRect();
-            workspacePressedOutsideRef.current =
-              e.clientX < rect.left ||
-              e.clientX > rect.right ||
-              e.clientY < rect.top ||
-              e.clientY > rect.bottom;
+            workspacePressedOutsideRef.current = isPointerOutsideDialog(
+              e,
+              workspaceMenuDialogRef.current
+            );
           }
         }}
         onPointerUp={(e) => {
           if (
             !("closedBy" in HTMLDialogElement.prototype) &&
-            workspacePressedOutsideRef.current
+            workspacePressedOutsideRef.current &&
+            isPointerOutsideDialog(e, workspaceMenuDialogRef.current)
           ) {
-            const dlg = workspaceMenuDialogRef.current;
-            if (dlg) {
-              const rect = dlg.getBoundingClientRect();
-              const outside =
-                e.clientX < rect.left ||
-                e.clientX > rect.right ||
-                e.clientY < rect.top ||
-                e.clientY > rect.bottom;
-              if (outside) setShowWorkspaceMenu(false);
-            }
+            setShowWorkspaceMenu(false);
           }
           workspacePressedOutsideRef.current = false;
         }}

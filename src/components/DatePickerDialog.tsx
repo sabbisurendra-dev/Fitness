@@ -323,10 +323,6 @@ export function DatePickerDialog({
         ref={dialogRef}
         aria-labelledby="calendar-picker-title"
         {...({ closedby: "any" } as Record<string, string>)}
-        onCancel={(e) => {
-          e.preventDefault();
-          closeCalendar();
-        }}
         onClose={() => {
           if (dialogRef.current) {
             dialogRef.current.returnValue = "";
